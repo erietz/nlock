@@ -4,17 +4,13 @@ const Io = std.Io;
 const nlock = @import("nlock");
 
 pub fn main(init: std.process.Init) !void {
-    // Prints to stderr, unbuffered, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    const options = try nlock.Options.parseArgs(init);
+    const command_str = std.mem.join(init.arena.allocator(), " ", options.command) catch {
+        std.log.err("Failed to join command arguments", .{});
+        return error.InvalidArguments;
+    };
 
-    // This is appropriate for anything that lives as long as the process.
-    const arena: std.mem.Allocator = init.arena.allocator();
-
-    // Accessing command line arguments:
-    const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
+    std.debug.print("Options: name={s}, global={}, command={s}.\n", .{ options.name, options.global, command_str });
 
     // In order to do I/O operations need an `Io` instance.
     const io = init.io;
