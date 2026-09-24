@@ -26,6 +26,49 @@ pub fn run(init: std.process.Init) !void {
         return error.InvalidArguments;
     };
     std.debug.print("Options: name={s}, global={}, command={s}.\n", .{ options.name, options.global, command_str });
+
+    var map: std.StringHashMap([]const u8) = .init(init.arena.allocator());
+    defer map.deinit();
+
+    try map.put(options.name, command_str);
+    std.debug.print("Stored command for name '{s}': {s}\n", .{ options.name, command_str });
+
+    // Start the server to listen for incoming connections
+    try runServer(init);
+}
+
+pub fn runServer(init: std.process.Init) !void {
+    const io = init.io;
+    const path = "/tmp/nlock.sock";
+
+    std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+
+    const address = try std.Io.net.UnixAddress.init(path);
+
+    var server = try address.listen(io, .{});
+    defer server.deinit(io);
+    std.debug.print("Server listening on {s}\n", .{path});
+
+    while (true) {
+        const stream = try server.accept(io);
+        defer stream.close(io);
+
+        var buffer: [1024]u8 = undefined;
+
+        var reader = stream.reader(io, &buffer);
+        const message = try reader.interface.takeDelimiterExclusive('\n');
+
+        std.debug.print("Received message: {s}\n", .{message});
+
+        var write_buffer: [1024]u8 = undefined;
+        var writer = stream.writer(io, &write_buffer);
+        try writer.interface.writeAll(message);
+        try writer.interface.flush();
+    }
 }
 
 pub fn writeToStdout(init: std.process.Init) !void {
