@@ -19,12 +19,12 @@ pub fn main(init: std.process.Init) void {
 }
 
 pub fn run(init: std.process.Init) !void {
-    const options = try nlock.Options.parseArgs(init);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const options = try nlock.Options.parseArgs(args);
     const command_str = std.mem.join(init.arena.allocator(), " ", options.command) catch {
         std.log.err("Failed to join command arguments", .{});
         return error.InvalidArguments;
     };
-
     std.debug.print("Options: name={s}, global={}, command={s}.\n", .{ options.name, options.global, command_str });
 }
 
