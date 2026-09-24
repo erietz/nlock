@@ -1,6 +1,5 @@
 const std = @import("std");
 const Io = std.Io;
-
 const shared = @import("shared");
 
 pub fn main(init: std.process.Init) void {
@@ -27,11 +26,18 @@ pub fn run(init: std.process.Init) !void {
     };
     std.debug.print("Options: name={s}, global={}, command={s}.\n", .{ options.name, options.global, command_str });
 
-    var map: std.StringHashMap([]const u8) = .init(init.arena.allocator());
-    defer map.deinit();
+    const address = try std.Io.net.UnixAddress.init(shared.SOCKET_PATH);
+    const stream = try address.connect(init.io);
+    defer stream.close(init.io);
 
-    try map.put(options.name, command_str);
-    std.debug.print("Stored command for name '{s}': {s}\n", .{ options.name, command_str });
+    var buffer: [1024]u8 = undefined;
+    var writer = stream.writer(init.io, &buffer);
+    const message = std.mem.join(init.arena.allocator(), " ", options.command) catch {
+        std.log.err("Failed to join command arguments", .{});
+        return error.InvalidArguments;
+    };
+    try writer.interface.writeAll(message);
+    try writer.interface.writeAll("\n");
 }
 
 pub fn writeToStdout(init: std.process.Init) !void {

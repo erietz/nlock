@@ -2,6 +2,8 @@
 const std = @import("std");
 const Io = std.Io;
 
+pub const SOCKET_PATH = "/tmp/nlock.sock";
+
 pub fn usage() []const u8 {
     return "Usage: nlock <name> [--global] -- <command> [args...]\n";
 }
