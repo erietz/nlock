@@ -34,19 +34,26 @@ pub fn runServer(init: std.process.Init) !void {
         const stream = try server.accept(io);
         defer stream.close(io);
 
-        var buffer: [1024]u8 = undefined;
-
-        var reader = stream.reader(io, &buffer);
-        const message = try reader.interface.takeDelimiterExclusive('\n');
-
-        std.debug.print("Received message: {s}\n", .{message});
-
-        try map.put("key", message);
-        std.debug.print("Stored command for key '{s}': {s}\n", .{ "key", message });
-
-        var write_buffer: [1024]u8 = undefined;
-        var writer = stream.writer(io, &write_buffer);
-        try writer.interface.writeAll(message);
-        try writer.interface.flush();
+        handleConnection(io, stream, &map) catch |err| {
+            std.debug.print("Connection error: {s}\n", .{@errorName(err)});
+        };
     }
+}
+
+fn handleConnection(io: Io, stream: std.Io.net.Stream, map: *std.StringHashMap([]const u8)) !void {
+    var buffer: [1024]u8 = undefined;
+
+    var reader = stream.reader(io, &buffer);
+    const message = try reader.interface.takeDelimiterExclusive('\n');
+
+    std.debug.print("Received message: {s}\n", .{message});
+
+    try map.put("key", message);
+    std.debug.print("Stored command for key '{s}': {s}\n", .{ "key", message });
+
+    var write_buffer: [1024]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+    try writer.interface.writeAll(message);
+    try writer.interface.writeAll("\n");
+    try writer.interface.flush();
 }
