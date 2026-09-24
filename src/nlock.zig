@@ -38,6 +38,12 @@ pub fn run(init: std.process.Init) !void {
     };
     try writer.interface.writeAll(message);
     try writer.interface.writeAll("\n");
+    try writer.interface.flush();
+
+    var read_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(init.io, &read_buffer);
+    const reply = try reader.interface.takeDelimiterExclusive('\n');
+    std.debug.print("Server replied: {s}\n", .{reply});
 }
 
 pub fn writeToStdout(init: std.process.Init) !void {
