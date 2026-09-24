@@ -13,7 +13,7 @@ pub fn run(init: std.process.Init) !void {
 
 pub fn runServer(init: std.process.Init) !void {
     const io = init.io;
-    const path = "/tmp/nlock.sock";
+    const path = shared.SOCKET_PATH;
 
     std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
         error.FileNotFound => {},
@@ -27,6 +27,9 @@ pub fn runServer(init: std.process.Init) !void {
     defer server.deinit(io);
     std.debug.print("Server listening on {s}\n", .{path});
 
+    var map: std.StringHashMap([]const u8) = .init(init.arena.allocator());
+    defer map.deinit();
+
     while (true) {
         const stream = try server.accept(io);
         defer stream.close(io);
@@ -37,6 +40,9 @@ pub fn runServer(init: std.process.Init) !void {
         const message = try reader.interface.takeDelimiterExclusive('\n');
 
         std.debug.print("Received message: {s}\n", .{message});
+
+        try map.put("key", message);
+        std.debug.print("Stored command for key '{s}': {s}\n", .{ "key", message });
 
         var write_buffer: [1024]u8 = undefined;
         var writer = stream.writer(io, &write_buffer);
