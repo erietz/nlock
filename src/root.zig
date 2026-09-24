@@ -2,10 +2,6 @@
 const std = @import("std");
 const Io = std.Io;
 
-// Usage:
-//
-// nlock <name> --global -- command --with --args and positional arguments
-
 pub const Options = struct {
     program: []const u8,
     name: []const u8,
@@ -44,6 +40,10 @@ pub const Options = struct {
         return options;
     }
 };
+
+pub fn usage() []const u8 {
+    return "Usage: nlock <name> [--global] -- <command> [args...]\n";
+}
 
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
 ///
