@@ -3,7 +3,22 @@ const Io = std.Io;
 
 const nlock = @import("nlock");
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) void {
+    run(init) catch |err| {
+        switch (err) {
+            error.InvalidArguments => {
+                const usage = nlock.usage();
+                std.debug.print("{s}", .{usage});
+            },
+            else => {
+                std.debug.print("An unexpected error occurred: {s}\n", .{@errorName(err)});
+            },
+        }
+        std.process.exit(1);
+    };
+}
+
+pub fn run(init: std.process.Init) !void {
     const options = try nlock.Options.parseArgs(init);
     const command_str = std.mem.join(init.arena.allocator(), " ", options.command) catch {
         std.log.err("Failed to join command arguments", .{});
@@ -11,7 +26,9 @@ pub fn main(init: std.process.Init) !void {
     };
 
     std.debug.print("Options: name={s}, global={}, command={s}.\n", .{ options.name, options.global, command_str });
+}
 
+pub fn writeToStdout(init: std.process.Init) !void {
     // In order to do I/O operations need an `Io` instance.
     const io = init.io;
 
