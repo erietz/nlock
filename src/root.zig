@@ -5,13 +5,20 @@ const cli = @import("cli.zig");
 const protocol = @import("protocol.zig");
 
 pub const SOCKET_PATH = "/tmp/nlock.sock";
-pub const Options = options.Options;
+pub const Command = options.Command;
+pub const RunOptions = options.RunOptions;
 pub const usage = cli.usage;
 pub const LockResponseStatus = protocol.LockResponseStatus;
 pub const LockRequestType = protocol.LockRequestType;
 pub const LockRequest = protocol.LockRequest;
 pub const LockResponse = protocol.LockResponse;
 pub const writeLine = protocol.writeLine;
+
+test {
+    _ = options;
+    _ = cli;
+    _ = protocol;
+}
 
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
 ///

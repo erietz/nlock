@@ -90,9 +90,10 @@ test "lockRequestToBytes serializes LockRequest correctly" {
         .request_type = LockRequestType.AcquireLock,
         .name = "mylock",
         .global = true,
+        .command = "echo Hello",
     };
     const bytes = request.toString();
-    try std.testing.expectEqualStrings("0:mylock:true", bytes);
+    try std.testing.expectEqualStrings("0:mylock:true:echo Hello", bytes);
 }
 
 test "lockRequestToBytes serializes LockRequest with ReleaseLock correctly" {
@@ -100,25 +101,28 @@ test "lockRequestToBytes serializes LockRequest with ReleaseLock correctly" {
         .request_type = LockRequestType.ReleaseLock,
         .name = "mylock",
         .global = false,
+        .command = "echo Hello",
     };
     const bytes = request.toString();
-    try std.testing.expectEqualStrings("1:mylock:false", bytes);
+    try std.testing.expectEqualStrings("1:mylock:false:echo Hello", bytes);
 }
 
 test "bytesToLockRequest deserializes bytes into LockRequest correctly" {
-    const bytes = "0:mylock:true";
+    const bytes = "0:mylock:true:echo Hello";
     const request = try LockRequest.fromString(bytes);
     try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(request.request_type));
     try std.testing.expectEqualStrings("mylock", request.name);
     try std.testing.expectEqual(true, request.global);
+    try std.testing.expectEqualStrings("echo Hello", request.command);
 }
 
 test "bytesToLockRequest deserializes bytes into LockRequest with ReleaseLock correctly" {
-    const bytes = "1:mylock:false";
+    const bytes = "1:mylock:false:echo Hello";
     const request = try LockRequest.fromString(bytes);
     try std.testing.expectEqual(@intFromEnum(LockRequestType.ReleaseLock), @intFromEnum(request.request_type));
     try std.testing.expectEqualStrings("mylock", request.name);
     try std.testing.expectEqual(false, request.global);
+    try std.testing.expectEqualStrings("echo Hello", request.command);
 }
 
 pub const LockResponse = struct {
