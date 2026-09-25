@@ -1,12 +1,12 @@
 const std = @import("std");
 const Io = std.Io;
-const shared = @import("shared");
+const nlock = @import("nlock");
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
         switch (err) {
             error.InvalidArguments => {
-                const usage = shared.usage();
+                const usage = nlock.usage();
                 std.debug.print("{s}", .{usage});
             },
             error.LockAlreadyAcquired => {
@@ -22,53 +22,53 @@ pub fn main(init: std.process.Init) void {
 
 pub fn run(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    const options = try shared.Options.parseArgs(args);
+    const options = try nlock.Options.parseArgs(args);
     const command_str = std.mem.join(init.arena.allocator(), " ", options.command) catch {
         std.log.err("Failed to join command arguments", .{});
         return error.InvalidArguments;
     };
     std.debug.print("Options: name={s}, global={}, command={s}.\n", .{ options.name, options.global, command_str });
 
-    const address = try std.Io.net.UnixAddress.init(shared.SOCKET_PATH);
+    const address = try std.Io.net.UnixAddress.init(nlock.SOCKET_PATH);
     const stream = try address.connect(init.io);
     defer stream.close(init.io);
 
     var buffer: [1024]u8 = undefined;
     var writer = stream.writer(init.io, &buffer);
 
-    const message = shared.LockRequest
-        .init(shared.LockRequestType.AcquireLock, options.name, options.global, command_str)
+    const message = nlock.LockRequest
+        .init(nlock.LockRequestType.AcquireLock, options.name, options.global, command_str)
         .toString();
 
-    try shared.writeLine(&writer.interface, message);
+    try nlock.writeLine(&writer.interface, message);
 
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
     const response_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
 
-    const lockResponse = shared.LockResponse.fromString(response_message) catch |err| {
+    const lockResponse = nlock.LockResponse.fromString(response_message) catch |err| {
         std.debug.print("Failed to parse response: {s}\n", .{@errorName(err)});
         return err;
     };
 
-    if (lockResponse.status == shared.LockResponseStatus.Busy) {
+    if (lockResponse.status == nlock.LockResponseStatus.Busy) {
         return error.LockAlreadyAcquired;
-    } else if (lockResponse.status == shared.LockResponseStatus.Ok) {
+    } else if (lockResponse.status == nlock.LockResponseStatus.Ok) {
         std.debug.print("Lock acquired successfully. Executing command... {s}\n", .{command_str});
         try runCommand(init.io, options.command);
 
-        const release_message = shared.LockRequest
-            .init(shared.LockRequestType.ReleaseLock, options.name, options.global, command_str)
+        const release_message = nlock.LockRequest
+            .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, command_str)
             .toString();
 
-        try shared.writeLine(&writer.interface, release_message);
+        try nlock.writeLine(&writer.interface, release_message);
 
         const release_response_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
-        const releaseResponse = shared.LockResponse.fromString(release_response_message) catch |err| {
+        const releaseResponse = nlock.LockResponse.fromString(release_response_message) catch |err| {
             std.debug.print("Failed to parse release response: {s}\n", .{@errorName(err)});
             return err;
         };
-        if (releaseResponse.status == shared.LockResponseStatus.Ok) {
+        if (releaseResponse.status == nlock.LockResponseStatus.Ok) {
             std.debug.print("Lock released successfully.\n", .{});
         } else {
             std.debug.print("Failed to release lock. Status: {d}\n", .{releaseResponse.status});
@@ -122,7 +122,7 @@ pub fn writeToStdout(init: std.process.Init) !void {
     var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
     const stdout_writer = &stdout_file_writer.interface;
 
-    try shared.printAnotherMessage(stdout_writer);
+    try nlock.printAnotherMessage(stdout_writer);
 
     try stdout_writer.flush(); // Don't forget to flush!
 }

@@ -1,6 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
-const shared = @import("shared");
+const nlock = @import("nlock");
 
 pub fn main(init: std.process.Init) !void {
     try run(init);
@@ -14,17 +14,17 @@ pub fn run(init: std.process.Init) !void {
 pub fn runServer(init: std.process.Init) !void {
     const io = init.io;
 
-    std.Io.Dir.cwd().deleteFile(io, shared.SOCKET_PATH) catch |err| switch (err) {
+    std.Io.Dir.cwd().deleteFile(io, nlock.SOCKET_PATH) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    defer std.Io.Dir.cwd().deleteFile(io, shared.SOCKET_PATH) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, nlock.SOCKET_PATH) catch {};
 
-    const address = try std.Io.net.UnixAddress.init(shared.SOCKET_PATH);
+    const address = try std.Io.net.UnixAddress.init(nlock.SOCKET_PATH);
 
     var server = try address.listen(io, .{});
     defer server.deinit(io);
-    std.log.info("Server started and listening on {s}", .{shared.SOCKET_PATH});
+    std.log.info("Server started and listening on {s}", .{nlock.SOCKET_PATH});
 
     // initialize structured task management group
     var group: Io.Group = .init;
@@ -64,7 +64,7 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
     var reader = stream.reader(io, &buffer);
     const message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
 
-    const lock_request = shared.LockRequest.fromString(message) catch |err| {
+    const lock_request = nlock.LockRequest.fromString(message) catch |err| {
         std.log.debug("Failed to parse message: {s}", .{@errorName(err)});
         return err;
     };
@@ -76,7 +76,7 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
     const lock_value = lock_request.command;
 
     switch (lock_request.request_type) {
-        shared.LockRequestType.AcquireLock => {
+        nlock.LockRequestType.AcquireLock => {
             mutex.lock(io) catch |err| {
                 std.log.err("Failed to acquire mutex lock: {s}", .{@errorName(err)});
                 return err;
@@ -86,9 +86,9 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
             if (existing_lock) |value| {
                 std.log.info("Lock for name '{s}' is already acquired with value {s}", .{ lock_name, value });
 
-                const lock_response = shared.LockResponse.init(shared.LockResponseStatus.Busy).toString();
+                const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toString();
 
-                try shared.writeLine(&writer.interface, lock_response);
+                try nlock.writeLine(&writer.interface, lock_response);
                 return error.LockAlreadyAcquired;
             }
 
@@ -106,8 +106,8 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
             };
             mutex.unlock(io);
 
-            const lock_response = shared.LockResponse.init(shared.LockResponseStatus.Ok).toString();
-            try shared.writeLine(&writer.interface, lock_response);
+            const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
+            try nlock.writeLine(&writer.interface, lock_response);
         },
         else => {
             std.log.debug("Received unexpected request type: {d}", .{lock_request.request_type});
@@ -117,13 +117,13 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
 
     // the client executes the command and then sends a release lock request
     const exec_request_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
-    const exec_request = shared.LockRequest.fromString(exec_request_message) catch |err| {
+    const exec_request = nlock.LockRequest.fromString(exec_request_message) catch |err| {
         std.log.debug("Failed to parse exec request message: {s}", .{@errorName(err)});
         return err;
     };
 
     switch (exec_request.request_type) {
-        shared.LockRequestType.ReleaseLock => {
+        nlock.LockRequestType.ReleaseLock => {
             std.log.info("Releasing lock for name '{s}' (global: {})", .{ exec_request.name, exec_request.global });
 
             mutex.lock(io) catch |err| {
@@ -135,13 +135,13 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
                 allocator.free(entry.key);
                 std.log.info("Lock for name '{s}' released successfully.", .{exec_request.name});
 
-                const lock_response = shared.LockResponse.init(shared.LockResponseStatus.Ok).toString();
-                try shared.writeLine(&writer.interface, lock_response);
+                const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
+                try nlock.writeLine(&writer.interface, lock_response);
             } else {
                 std.log.err("No lock found for name '{s}' to release.", .{exec_request.name});
                 // TODO: should this be a Busy response or an error? For now, we will send a Busy response.
-                const lock_response = shared.LockResponse.init(shared.LockResponseStatus.Busy).toString();
-                try shared.writeLine(&writer.interface, lock_response);
+                const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toString();
+                try nlock.writeLine(&writer.interface, lock_response);
             }
         },
         else => {
