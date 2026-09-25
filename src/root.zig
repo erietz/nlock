@@ -201,6 +201,10 @@ pub const LockRequest = struct {
     }
 
     pub fn fromString(bytes: []const u8) !LockRequest {
+        if (bytes.len == 0) {
+            return error.InvalidRequestFormat;
+        }
+
         var lock_request = LockRequest{
             .request_type = LockRequestType.AcquireLock,
             .name = "",
