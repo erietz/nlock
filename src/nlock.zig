@@ -22,7 +22,13 @@ pub fn main(init: std.process.Init) void {
 
 pub fn run(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    const options = try nlock.Options.parseArgs(args);
+    switch (try nlock.Command.parseArgs(args)) {
+        .run => |options| try runLocked(init, options),
+        .list => return error.NotImplemented,
+    }
+}
+
+pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
     const command_str = std.mem.join(init.arena.allocator(), " ", options.command) catch {
         std.log.err("Failed to join command arguments", .{});
         return error.InvalidArguments;
