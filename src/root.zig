@@ -274,6 +274,36 @@ test "bytesToLockRequest deserializes bytes into LockRequest with ReleaseLock co
     try std.testing.expectEqual(false, request.global);
 }
 
+pub const LockResponse = struct {
+    status: LockResponseStatus,
+
+    pub fn init(status: LockResponseStatus) LockResponse {
+        return LockResponse{
+            .status = status,
+        };
+    }
+
+    pub fn toString(self: LockResponse) []const u8 {
+        return std.fmt.allocPrint(
+            std.heap.page_allocator,
+            "{d}",
+            .{@intFromEnum(self.status)},
+        ) catch unreachable;
+    }
+
+    pub fn fromString(bytes: []const u8) !LockResponse {
+        const status = switch (try std.fmt.parseInt(u8, bytes, 10)) {
+            0 => LockResponseStatus.Ok,
+            1 => LockResponseStatus.Busy,
+            2 => LockResponseStatus.Timeout,
+            else => return error.InvalidResponseStatus,
+        };
+        return LockResponse{
+            .status = status,
+        };
+    }
+};
+
 /// This is a documentation comment to explain the `printAnotherMessage` function below.
 ///
 /// Accepting an `Io.Writer` instance is a handy way to write reusable code.

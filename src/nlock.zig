@@ -32,18 +32,35 @@ pub fn run(init: std.process.Init) !void {
 
     var buffer: [1024]u8 = undefined;
     var writer = stream.writer(init.io, &buffer);
-    const message = std.mem.join(init.arena.allocator(), " ", options.command) catch {
-        std.log.err("Failed to join command arguments", .{});
-        return error.InvalidArguments;
-    };
+
+    const message = shared.LockRequest
+        .init(shared.LockRequestType.AcquireLock, options.name, options.global)
+        .toString();
+
     try writer.interface.writeAll(message);
     try writer.interface.writeAll("\n");
     try writer.interface.flush();
 
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
-    const reply = try reader.interface.takeDelimiterExclusive('\n');
-    std.debug.print("Server replied: {s}\n", .{reply});
+    const response_message = try reader.interface.takeDelimiterExclusive('\n');
+
+    const lockResponse = shared.LockResponse.fromString(response_message) catch |err| {
+        std.debug.print("Failed to parse response: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    if (lockResponse.status == shared.LockResponseStatus.Busy) {
+        std.debug.print("Lock is already acquired by another process.\n", .{});
+        return error.LockAlreadyAcquired;
+    } else if (lockResponse.status == shared.LockResponseStatus.Ok) {
+        std.debug.print("Lock acquired successfully. Executing command...\n", .{});
+        // const result = try std.process.exec(init.arena.allocator(), options.command, .{});
+        // std.debug.print("Command executed with exit code: {d}\n", .{result.exit_code});
+    } else {
+        std.debug.print("Received unknown lock response status.\n", .{});
+        return error.UnknownLockResponse;
+    }
 }
 
 pub fn writeToStdout(init: std.process.Init) !void {
