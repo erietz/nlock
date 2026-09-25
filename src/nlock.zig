@@ -43,7 +43,7 @@ pub fn run(init: std.process.Init) !void {
 
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
-    const response_message = try reader.interface.takeDelimiterExclusive('\n');
+    const response_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
 
     const lockResponse = shared.LockResponse.fromString(response_message) catch |err| {
         std.debug.print("Failed to parse response: {s}\n", .{@errorName(err)});
@@ -54,9 +54,29 @@ pub fn run(init: std.process.Init) !void {
         std.debug.print("Lock is already acquired by another process.\n", .{});
         return error.LockAlreadyAcquired;
     } else if (lockResponse.status == shared.LockResponseStatus.Ok) {
-        std.debug.print("Lock acquired successfully. Executing command...\n", .{});
+        std.debug.print("Lock acquired successfully. Executing command... {s}\n", .{command_str});
         // const result = try std.process.exec(init.arena.allocator(), options.command, .{});
         // std.debug.print("Command executed with exit code: {d}\n", .{result.exit_code});
+
+        const release_message = shared.LockRequest
+            .init(shared.LockRequestType.ReleaseLock, options.name, options.global)
+            .toString();
+
+        try writer.interface.writeAll(release_message);
+        try writer.interface.writeAll("\n");
+        try writer.interface.flush();
+
+        const release_response_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
+        const releaseResponse = shared.LockResponse.fromString(release_response_message) catch |err| {
+            std.debug.print("Failed to parse release response: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        if (releaseResponse.status == shared.LockResponseStatus.Ok) {
+            std.debug.print("Lock released successfully.\n", .{});
+        } else {
+            std.debug.print("Failed to release lock. Status: {d}\n", .{releaseResponse.status});
+            return error.LockReleaseFailed;
+        }
     } else {
         std.debug.print("Received unknown lock response status.\n", .{});
         return error.UnknownLockResponse;
