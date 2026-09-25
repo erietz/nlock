@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 
 pub const LockResponseStatus = enum {
     Ok,
@@ -149,3 +150,9 @@ pub const LockResponse = struct {
         };
     }
 };
+
+pub fn writeLine(writer: *Io.Writer, message: []const u8) Io.Writer.Error!void {
+    try writer.writeAll(message);
+    try writer.writeAll("\n");
+    try writer.flush();
+}
