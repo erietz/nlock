@@ -24,7 +24,7 @@ pub fn runServer(init: std.process.Init) !void {
 
     var server = try address.listen(io, .{});
     defer server.deinit(io);
-    std.debug.print("Server listening on {s}\n", .{shared.SOCKET_PATH});
+    std.log.info("Server started and listening on {s}", .{shared.SOCKET_PATH});
 
     const allocator = init.gpa;
     var map: std.StringHashMap([]const u8) = .init(allocator);
@@ -39,7 +39,7 @@ pub fn runServer(init: std.process.Init) !void {
         defer stream.close(io);
 
         handleConnection(io, allocator, stream, &map) catch |err| {
-            std.debug.print("Connection error: {s}\n", .{@errorName(err)});
+            std.log.debug("Connection error: {s}", .{@errorName(err)});
         };
     }
 }
@@ -51,7 +51,7 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
     const message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
 
     const lock_request = shared.LockRequest.fromString(message) catch |err| {
-        std.debug.print("Failed to parse message: {s}\n", .{@errorName(err)});
+        std.log.debug("Failed to parse message: {s}", .{@errorName(err)});
         return err;
     };
 
@@ -64,16 +64,14 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
         shared.LockRequestType.AcquireLock => {
             const existing_lock = map.get(lock_name);
             if (existing_lock) |value| {
-                std.debug.print("Lock for name '{s}' is already acquired with value {s}", .{ lock_name, value });
+                std.log.info("Lock for name '{s}' is already acquired with value {s}", .{ lock_name, value });
 
                 const lock_response = shared.LockResponse.init(shared.LockResponseStatus.Busy).toString();
 
-                try writer.interface.writeAll(lock_response);
-                try writer.interface.writeAll("\n");
-                try writer.interface.flush();
+                try shared.writeLine(&writer.interface, lock_response);
                 return error.LockAlreadyAcquired;
             }
-            std.debug.print("Acquiring lock for name '{s}' (global: {})\n", .{ lock_name, lock_request.global });
+            std.log.info("Acquiring lock for name '{s}' (global: {})", .{ lock_name, lock_request.global });
 
             const lock_name_copy = try allocator.dupe(u8, lock_name);
             map.put(lock_name_copy, "lock value") catch |err| {
@@ -82,13 +80,10 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
             };
 
             const lock_response = shared.LockResponse.init(shared.LockResponseStatus.Ok).toString();
-
-            try writer.interface.writeAll(lock_response);
-            try writer.interface.writeAll("\n");
-            try writer.interface.flush();
+            try shared.writeLine(&writer.interface, lock_response);
         },
         else => {
-            std.debug.print("Received unexpected request type: {d}\n", .{lock_request.request_type});
+            std.log.debug("Received unexpected request type: {d}", .{lock_request.request_type});
             return error.UnexpectedRequestType;
         },
     }
@@ -96,33 +91,29 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
     // the client executes the command and then sends a release lock request
     const exec_request_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
     const exec_request = shared.LockRequest.fromString(exec_request_message) catch |err| {
-        std.debug.print("Failed to parse exec request message: {s}\n", .{@errorName(err)});
+        std.log.debug("Failed to parse exec request message: {s}", .{@errorName(err)});
         return err;
     };
 
     switch (exec_request.request_type) {
         shared.LockRequestType.ReleaseLock => {
-            std.debug.print("Releasing lock for name '{s}' (global: {})\n", .{ exec_request.name, exec_request.global });
+            std.log.info("Releasing lock for name '{s}' (global: {})", .{ exec_request.name, exec_request.global });
 
             if (map.fetchRemove(exec_request.name)) |entry| {
                 allocator.free(entry.key);
-                std.debug.print("Lock for name '{s}' released successfully.\n", .{exec_request.name});
+                std.log.info("Lock for name '{s}' released successfully.", .{exec_request.name});
 
                 const lock_response = shared.LockResponse.init(shared.LockResponseStatus.Ok).toString();
-                try writer.interface.writeAll(lock_response);
-                try writer.interface.writeAll("\n");
-                try writer.interface.flush();
+                try shared.writeLine(&writer.interface, lock_response);
             } else {
-                std.debug.print("No lock found for name '{s}' to release.\n", .{exec_request.name});
+                std.log.err("No lock found for name '{s}' to release.", .{exec_request.name});
                 // TODO: should this be a Busy response or an error? For now, we will send a Busy response.
                 const lock_response = shared.LockResponse.init(shared.LockResponseStatus.Busy).toString();
-                try writer.interface.writeAll(lock_response);
-                try writer.interface.writeAll("\n");
-                try writer.interface.flush();
+                try shared.writeLine(&writer.interface, lock_response);
             }
         },
         else => {
-            std.debug.print("Received unexpected request type: {d}\n", .{exec_request.request_type});
+            std.log.debug("Received unexpected request type: {d}", .{exec_request.request_type});
             return error.UnexpectedRequestType;
         },
     }
