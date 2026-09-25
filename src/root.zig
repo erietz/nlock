@@ -314,3 +314,9 @@ pub const LockResponse = struct {
 pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
     try writer.print("Run `zig build test` to run the tests.\n", .{});
 }
+
+pub fn writeLine(writer: *Io.Writer, message: []const u8) Io.Writer.Error!void {
+    try writer.writeAll(message);
+    try writer.writeAll("\n");
+    try writer.flush();
+}

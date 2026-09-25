@@ -37,9 +37,7 @@ pub fn run(init: std.process.Init) !void {
         .init(shared.LockRequestType.AcquireLock, options.name, options.global)
         .toString();
 
-    try writer.interface.writeAll(message);
-    try writer.interface.writeAll("\n");
-    try writer.interface.flush();
+    try shared.writeLine(&writer.interface, message);
 
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
@@ -61,9 +59,7 @@ pub fn run(init: std.process.Init) !void {
             .init(shared.LockRequestType.ReleaseLock, options.name, options.global)
             .toString();
 
-        try writer.interface.writeAll(release_message);
-        try writer.interface.writeAll("\n");
-        try writer.interface.flush();
+        try shared.writeLine(&writer.interface, release_message);
 
         const release_response_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
         const releaseResponse = shared.LockResponse.fromString(release_response_message) catch |err| {
