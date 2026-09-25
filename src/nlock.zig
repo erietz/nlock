@@ -55,8 +55,7 @@ pub fn run(init: std.process.Init) !void {
         return error.LockAlreadyAcquired;
     } else if (lockResponse.status == shared.LockResponseStatus.Ok) {
         std.debug.print("Lock acquired successfully. Executing command... {s}\n", .{command_str});
-        // const result = try std.process.exec(init.arena.allocator(), options.command, .{});
-        // std.debug.print("Command executed with exit code: {d}\n", .{result.exit_code});
+        try runCommand(init.io, options.command);
 
         const release_message = shared.LockRequest
             .init(shared.LockRequestType.ReleaseLock, options.name, options.global)
@@ -80,6 +79,37 @@ pub fn run(init: std.process.Init) !void {
     } else {
         std.debug.print("Received unknown lock response status.\n", .{});
         return error.UnknownLockResponse;
+    }
+}
+
+pub fn runCommand(io: Io, command: []const []const u8) !void {
+    const spawnOptions: std.process.SpawnOptions = .{
+        .argv = command,
+    };
+
+    var child = std.process.spawn(io, spawnOptions) catch |err| {
+        std.debug.print("Failed to spawn command: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    const term = child.wait(io) catch |err| {
+        std.debug.print("Failed to wait for command: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    switch (term) {
+        .exited => {
+            std.debug.print("Command exited with code: {d}\n", .{term.exited});
+        },
+        .signal => {
+            std.debug.print("Command terminated by signal: {d}\n", .{term.signal});
+        },
+        .stopped => {
+            std.debug.print("Command stopped by signal: {d}\n", .{term.signal});
+        },
+        .unknown => {
+            std.debug.print("Command terminated with unknown status.\n", .{});
+        },
     }
 }
 
