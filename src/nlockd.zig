@@ -13,19 +13,18 @@ pub fn run(init: std.process.Init) !void {
 
 pub fn runServer(init: std.process.Init) !void {
     const io = init.io;
-    const path = shared.SOCKET_PATH;
 
-    std.Io.Dir.cwd().deleteFile(io, path) catch |err| switch (err) {
+    std.Io.Dir.cwd().deleteFile(io, shared.SOCKET_PATH) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    defer std.Io.Dir.cwd().deleteFile(io, path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, shared.SOCKET_PATH) catch {};
 
-    const address = try std.Io.net.UnixAddress.init(path);
+    const address = try std.Io.net.UnixAddress.init(shared.SOCKET_PATH);
 
     var server = try address.listen(io, .{});
     defer server.deinit(io);
-    std.debug.print("Server listening on {s}\n", .{path});
+    std.debug.print("Server listening on {s}\n", .{shared.SOCKET_PATH});
 
     var map: std.StringHashMap([]const u8) = .init(init.arena.allocator());
     defer map.deinit();
