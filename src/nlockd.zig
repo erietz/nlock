@@ -32,6 +32,7 @@ pub fn runServer(init: std.process.Init) !void {
 
     const allocator = init.gpa;
     var map: std.StringHashMap([]const u8) = .init(allocator);
+    var mutex = std.Io.Mutex.init;
     defer {
         var it = map.keyIterator();
         while (it.next()) |key| allocator.free(key.*);
@@ -40,7 +41,7 @@ pub fn runServer(init: std.process.Init) !void {
 
     while (true) {
         const stream = try server.accept(io);
-        group.concurrent(io, connectionTask, .{ io, allocator, stream, &map }) catch |err| {
+        group.concurrent(io, connectionTask, .{ io, allocator, stream, &map, &mutex }) catch |err| {
             std.log.err("Failed to spawn connection task: {s}", .{@errorName(err)});
             stream.close(io);
         };
@@ -49,15 +50,15 @@ pub fn runServer(init: std.process.Init) !void {
 
 /// Owns the stream for the lifetime of the connection and adapts
 /// `handleConnection` to the `Cancelable!void` signature `Io.Group` requires.
-fn connectionTask(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, map: *std.StringHashMap([]const u8)) Io.Cancelable!void {
+fn connectionTask(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, map: *std.StringHashMap([]const u8), mutex: *std.Io.Mutex) Io.Cancelable!void {
     defer stream.close(io);
 
-    handleConnection(io, allocator, stream, map) catch |err| {
+    handleConnection(io, allocator, stream, map, mutex) catch |err| {
         std.log.debug("Connection error: {s}", .{@errorName(err)});
     };
 }
 
-fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, map: *std.StringHashMap([]const u8)) !void {
+fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, map: *std.StringHashMap([]const u8), mutex: *std.Io.Mutex) !void {
     var buffer: [1024]u8 = undefined;
 
     var reader = stream.reader(io, &buffer);
@@ -76,7 +77,12 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
 
     switch (lock_request.request_type) {
         shared.LockRequestType.AcquireLock => {
+            mutex.lock(io) catch |err| {
+                std.log.err("Failed to acquire mutex lock: {s}", .{@errorName(err)});
+                return err;
+            };
             const existing_lock = map.get(lock_name);
+            mutex.unlock(io);
             if (existing_lock) |value| {
                 std.log.info("Lock for name '{s}' is already acquired with value {s}", .{ lock_name, value });
 
@@ -89,10 +95,16 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
             std.log.info("Acquiring lock for name '{s}' (global: {}). Command: {s}", .{ lock_name, lock_request.global, lock_value });
 
             const lock_name_copy = try allocator.dupe(u8, lock_name);
+            mutex.lock(io) catch |err| {
+                std.log.err("Failed to acquire mutex lock: {s}", .{@errorName(err)});
+                allocator.free(lock_name_copy);
+                return err;
+            };
             map.put(lock_name_copy, lock_value) catch |err| {
                 allocator.free(lock_name_copy);
                 return err;
             };
+            mutex.unlock(io);
 
             const lock_response = shared.LockResponse.init(shared.LockResponseStatus.Ok).toString();
             try shared.writeLine(&writer.interface, lock_response);
@@ -114,7 +126,12 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
         shared.LockRequestType.ReleaseLock => {
             std.log.info("Releasing lock for name '{s}' (global: {})", .{ exec_request.name, exec_request.global });
 
+            mutex.lock(io) catch |err| {
+                std.log.err("Failed to acquire mutex lock: {s}", .{@errorName(err)});
+                return err;
+            };
             if (map.fetchRemove(exec_request.name)) |entry| {
+                mutex.unlock(io);
                 allocator.free(entry.key);
                 std.log.info("Lock for name '{s}' released successfully.", .{exec_request.name});
 
