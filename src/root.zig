@@ -179,23 +179,26 @@ pub const LockRequest = struct {
     request_type: LockRequestType,
     name: []const u8,
     global: bool,
+    command: []const u8,
 
-    pub fn init(request_type: LockRequestType, name: []const u8, global: bool) LockRequest {
+    pub fn init(request_type: LockRequestType, name: []const u8, global: bool, command: []const u8) LockRequest {
         return LockRequest{
             .request_type = request_type,
             .name = name,
             .global = global,
+            .command = command,
         };
     }
 
     pub fn toString(self: LockRequest) []const u8 {
         return std.fmt.allocPrint(
             std.heap.page_allocator,
-            "{d}:{s}:{}",
+            "{d}:{s}:{}:{s}",
             .{
                 @intFromEnum(self.request_type),
                 self.name,
                 self.global,
+                self.command,
             },
         ) catch unreachable;
     }
@@ -209,6 +212,7 @@ pub const LockRequest = struct {
             .request_type = LockRequestType.AcquireLock,
             .name = "",
             .global = false,
+            .command = "",
         };
 
         var parts = std.mem.splitScalar(u8, bytes, ':');
@@ -231,6 +235,8 @@ pub const LockRequest = struct {
                 } else {
                     return error.InvalidGlobalFlag;
                 }
+            } else if (i == 3) {
+                lock_request.command = part;
             } else {
                 return error.InvalidRequestFormat;
             }
