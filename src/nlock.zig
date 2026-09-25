@@ -9,6 +9,9 @@ pub fn main(init: std.process.Init) void {
                 const usage = shared.usage();
                 std.debug.print("{s}", .{usage});
             },
+            error.LockAlreadyAcquired => {
+                std.debug.print("Lock is already acquired by another process.\n", .{});
+            },
             else => {
                 std.debug.print("An unexpected error occurred: {s}\n", .{@errorName(err)});
             },
@@ -34,7 +37,7 @@ pub fn run(init: std.process.Init) !void {
     var writer = stream.writer(init.io, &buffer);
 
     const message = shared.LockRequest
-        .init(shared.LockRequestType.AcquireLock, options.name, options.global)
+        .init(shared.LockRequestType.AcquireLock, options.name, options.global, command_str)
         .toString();
 
     try shared.writeLine(&writer.interface, message);
@@ -49,14 +52,13 @@ pub fn run(init: std.process.Init) !void {
     };
 
     if (lockResponse.status == shared.LockResponseStatus.Busy) {
-        std.debug.print("Lock is already acquired by another process.\n", .{});
         return error.LockAlreadyAcquired;
     } else if (lockResponse.status == shared.LockResponseStatus.Ok) {
         std.debug.print("Lock acquired successfully. Executing command... {s}\n", .{command_str});
         try runCommand(init.io, options.command);
 
         const release_message = shared.LockRequest
-            .init(shared.LockRequestType.ReleaseLock, options.name, options.global)
+            .init(shared.LockRequestType.ReleaseLock, options.name, options.global, command_str)
             .toString();
 
         try shared.writeLine(&writer.interface, release_message);

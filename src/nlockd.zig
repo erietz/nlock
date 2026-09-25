@@ -26,6 +26,10 @@ pub fn runServer(init: std.process.Init) !void {
     defer server.deinit(io);
     std.log.info("Server started and listening on {s}", .{shared.SOCKET_PATH});
 
+    // initialize structured task management group
+    var group: Io.Group = .init;
+    defer group.cancel(io);
+
     const allocator = init.gpa;
     var map: std.StringHashMap([]const u8) = .init(allocator);
     defer {
@@ -36,12 +40,21 @@ pub fn runServer(init: std.process.Init) !void {
 
     while (true) {
         const stream = try server.accept(io);
-        defer stream.close(io);
-
-        handleConnection(io, allocator, stream, &map) catch |err| {
-            std.log.debug("Connection error: {s}", .{@errorName(err)});
+        group.concurrent(io, connectionTask, .{ io, allocator, stream, &map }) catch |err| {
+            std.log.err("Failed to spawn connection task: {s}", .{@errorName(err)});
+            stream.close(io);
         };
     }
+}
+
+/// Owns the stream for the lifetime of the connection and adapts
+/// `handleConnection` to the `Cancelable!void` signature `Io.Group` requires.
+fn connectionTask(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, map: *std.StringHashMap([]const u8)) Io.Cancelable!void {
+    defer stream.close(io);
+
+    handleConnection(io, allocator, stream, map) catch |err| {
+        std.log.debug("Connection error: {s}", .{@errorName(err)});
+    };
 }
 
 fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, map: *std.StringHashMap([]const u8)) !void {
@@ -59,6 +72,7 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
     var writer = stream.writer(io, &write_buffer);
 
     const lock_name = lock_request.name;
+    const lock_value = lock_request.command;
 
     switch (lock_request.request_type) {
         shared.LockRequestType.AcquireLock => {
@@ -71,10 +85,11 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
                 try shared.writeLine(&writer.interface, lock_response);
                 return error.LockAlreadyAcquired;
             }
-            std.log.info("Acquiring lock for name '{s}' (global: {})", .{ lock_name, lock_request.global });
+
+            std.log.info("Acquiring lock for name '{s}' (global: {}). Command: {s}", .{ lock_name, lock_request.global, lock_value });
 
             const lock_name_copy = try allocator.dupe(u8, lock_name);
-            map.put(lock_name_copy, "lock value") catch |err| {
+            map.put(lock_name_copy, lock_value) catch |err| {
                 allocator.free(lock_name_copy);
                 return err;
             };
