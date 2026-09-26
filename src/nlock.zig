@@ -50,13 +50,11 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
         options,
     );
 
-    if (acquireStatus == nlock.LockResponseStatus.Busy) {
-        return error.LockAlreadyAcquired;
-    } else if (acquireStatus == nlock.LockResponseStatus.Ok) {
+    if (acquireStatus == nlock.LockResponseStatus.Ok) {
         runCommand(init.io, options.command) catch |err| {
+            // Even if the command fails, we should still attempt to release
+            // the lock so no return error here, just log the error
             std.debug.print("Failed to run command: {s}\n", .{@errorName(err)});
-            // Even if the command fails, we should still attempt to release the lock
-            // so no return error here, just log the error
         };
 
         const releaseStatus = try releaseLock(
@@ -70,6 +68,8 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
             std.debug.print("Failed to release lock. Status: {d}\n", .{releaseStatus});
             return error.LockReleaseFailed;
         }
+    } else if (acquireStatus == nlock.LockResponseStatus.Busy) {
+        return error.LockAlreadyAcquired;
     } else {
         std.debug.print("Received unknown lock response status.\n", .{});
         return error.UnknownLockResponse;
