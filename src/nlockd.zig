@@ -41,7 +41,13 @@ pub fn runServer(init: std.process.Init) !void {
 
     while (true) {
         const stream = try server.accept(io);
-        group.concurrent(io, connectionTask, .{ io, allocator, stream, &map, &mutex }) catch |err| {
+        group.concurrent(io, connectionTask, .{
+            io,
+            allocator,
+            stream,
+            &map,
+            &mutex,
+        }) catch |err| {
             std.log.err("Failed to spawn connection task: {s}", .{@errorName(err)});
             stream.close(io);
         };
@@ -50,7 +56,13 @@ pub fn runServer(init: std.process.Init) !void {
 
 /// Owns the stream for the lifetime of the connection and adapts
 /// `handleConnection` to the `Cancelable!void` signature `Io.Group` requires.
-fn connectionTask(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, map: *std.StringHashMap([]const u8), mutex: *std.Io.Mutex) Io.Cancelable!void {
+fn connectionTask(
+    io: Io,
+    allocator: std.mem.Allocator,
+    stream: std.Io.net.Stream,
+    map: *std.StringHashMap([]const u8),
+    mutex: *std.Io.Mutex,
+) Io.Cancelable!void {
     defer stream.close(io);
 
     handleConnection(io, allocator, stream, map, mutex) catch |err| {
@@ -58,7 +70,13 @@ fn connectionTask(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Strea
     };
 }
 
-fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Stream, map: *std.StringHashMap([]const u8), mutex: *std.Io.Mutex) !void {
+fn handleConnection(
+    io: Io,
+    allocator: std.mem.Allocator,
+    stream: std.Io.net.Stream,
+    map: *std.StringHashMap([]const u8),
+    mutex: *std.Io.Mutex,
+) !void {
     var buffer: [1024]u8 = undefined;
 
     var reader = stream.reader(io, &buffer);
@@ -84,7 +102,10 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
             const existing_lock = map.get(lock_name);
             mutex.unlock(io);
             if (existing_lock) |value| {
-                std.log.info("Lock for name '{s}' is already acquired with value {s}", .{ lock_name, value });
+                std.log.info("Lock for name '{s}' is already acquired with value {s}", .{
+                    lock_name,
+                    value,
+                });
 
                 const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toString();
 
@@ -92,7 +113,11 @@ fn handleConnection(io: Io, allocator: std.mem.Allocator, stream: std.Io.net.Str
                 return error.LockAlreadyAcquired;
             }
 
-            std.log.info("Acquiring lock for name '{s}' (global: {}). Command: {s}", .{ lock_name, lock_request.global, lock_value });
+            std.log.info("Acquiring lock for name '{s}' (global: {}). Command: {s}", .{
+                lock_name,
+                lock_request.global,
+                lock_value,
+            });
 
             const lock_name_copy = try allocator.dupe(u8, lock_name);
             mutex.lock(io) catch |err| {
