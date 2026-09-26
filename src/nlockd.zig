@@ -83,11 +83,7 @@ fn handleConnection(
     var writer = stream.writer(io, &write_buffer);
 
     // Read the request message from the client
-    const message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
-    const lock_request = nlock.LockRequest.fromString(message) catch |err| {
-        std.log.debug("Failed to parse message: {s}", .{@errorName(err)});
-        return err;
-    };
+    const lock_request = try readRequest(&reader.interface);
     switch (lock_request.request_type) {
         nlock.LockRequestType.AcquireLock => {
             handleAcquireLockRequest(
@@ -109,12 +105,7 @@ fn handleConnection(
     }
 
     // The client executes the command and then sends a release lock request
-    const exec_request_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
-    const exec_request = nlock.LockRequest.fromString(exec_request_message) catch |err| {
-        std.log.debug("Failed to parse exec request message: {s}", .{@errorName(err)});
-        return err;
-    };
-
+    const exec_request = try readRequest(&reader.interface);
     switch (exec_request.request_type) {
         nlock.LockRequestType.ReleaseLock => {
             handleReleaseLockRequest(
@@ -134,6 +125,14 @@ fn handleConnection(
             return error.UnexpectedRequestType;
         },
     }
+}
+
+fn readRequest(reader: *Io.Reader) !nlock.LockRequest {
+    const message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
+    return nlock.LockRequest.fromString(message) catch |err| {
+        std.log.debug("Failed to parse message: {s}", .{@errorName(err)});
+        return err;
+    };
 }
 
 fn handleAcquireLockRequest(
