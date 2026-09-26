@@ -33,60 +33,101 @@ pub fn run(init: std.process.Init) !void {
 }
 
 pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
-    const command_str = std.mem.join(init.arena.allocator(), " ", options.command) catch {
-        std.log.err("Failed to join command arguments", .{});
-        return error.InvalidArguments;
-    };
-
     const address = try std.Io.net.UnixAddress.init(nlock.SOCKET_PATH);
     const stream = try address.connect(init.io);
     defer stream.close(init.io);
 
-    var buffer: [1024]u8 = undefined;
-    var writer = stream.writer(init.io, &buffer);
-
-    const message = nlock.LockRequest
-        .init(nlock.LockRequestType.AcquireLock, options.name, options.global, command_str)
-        .toString();
-
-    try nlock.writeLine(&writer.interface, message);
+    var write_buffer: [1024]u8 = undefined;
+    var writer = stream.writer(init.io, &write_buffer);
 
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
-    const response_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
 
-    const lockResponse = nlock.LockResponse.fromString(response_message) catch |err| {
-        std.debug.print("Failed to parse response: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    const acquireStatus = try acquireLock(
+        init.arena.allocator(),
+        &writer.interface,
+        &reader.interface,
+        options,
+    );
 
-    if (lockResponse.status == nlock.LockResponseStatus.Busy) {
+    if (acquireStatus == nlock.LockResponseStatus.Busy) {
         return error.LockAlreadyAcquired;
-    } else if (lockResponse.status == nlock.LockResponseStatus.Ok) {
+    } else if (acquireStatus == nlock.LockResponseStatus.Ok) {
         runCommand(init.io, options.command) catch |err| {
             std.debug.print("Failed to run command: {s}\n", .{@errorName(err)});
             // Even if the command fails, we should still attempt to release the lock
+            // so no return error here, just log the error
         };
 
-        const release_message = nlock.LockRequest
-            .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, command_str)
-            .toString();
+        const releaseStatus = try releaseLock(
+            init.arena.allocator(),
+            &writer.interface,
+            &reader.interface,
+            options,
+        );
 
-        try nlock.writeLine(&writer.interface, release_message);
-
-        const release_response_message = (try reader.interface.takeDelimiter('\n')) orelse return error.EndOfStream;
-        const releaseResponse = nlock.LockResponse.fromString(release_response_message) catch |err| {
-            std.debug.print("Failed to parse release response: {s}\n", .{@errorName(err)});
-            return err;
-        };
-        if (releaseResponse.status != nlock.LockResponseStatus.Ok) {
-            std.debug.print("Failed to release lock. Status: {d}\n", .{releaseResponse.status});
+        if (releaseStatus != nlock.LockResponseStatus.Ok) {
+            std.debug.print("Failed to release lock. Status: {d}\n", .{releaseStatus});
             return error.LockReleaseFailed;
         }
     } else {
         std.debug.print("Received unknown lock response status.\n", .{});
         return error.UnknownLockResponse;
     }
+}
+
+pub fn acquireLock(
+    allocator: std.mem.Allocator,
+    writer: *Io.Writer,
+    reader: *Io.Reader,
+    options: nlock.RunOptions,
+) !nlock.LockResponseStatus {
+    const command_str = std.mem.join(allocator, " ", options.command) catch {
+        std.log.err("Failed to join command arguments", .{});
+        return error.InvalidArguments;
+    };
+    defer allocator.free(command_str);
+    const message = nlock.LockRequest
+        .init(nlock.LockRequestType.AcquireLock, options.name, options.global, command_str)
+        .toString();
+
+    try nlock.writeLine(writer, message);
+
+    const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
+
+    const lock_response = nlock.LockResponse.fromString(response_message) catch |err| {
+        std.debug.print("Failed to parse response: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    return lock_response.status;
+}
+
+pub fn releaseLock(
+    allocator: std.mem.Allocator,
+    writer: *Io.Writer,
+    reader: *Io.Reader,
+    options: nlock.RunOptions,
+) !nlock.LockResponseStatus {
+    const command_str = std.mem.join(allocator, " ", options.command) catch {
+        std.log.err("Failed to join command arguments", .{});
+        return error.InvalidArguments;
+    };
+    defer allocator.free(command_str);
+    const release_message = nlock.LockRequest
+        .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, command_str)
+        .toString();
+
+    try nlock.writeLine(writer, release_message);
+
+    const release_response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
+
+    const release_response = nlock.LockResponse.fromString(release_response_message) catch |err| {
+        std.debug.print("Failed to parse release response: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
+    return release_response.status;
 }
 
 pub fn runCommand(io: Io, command: []const []const u8) !void {
