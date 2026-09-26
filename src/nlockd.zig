@@ -31,6 +31,8 @@ pub fn runServer(init: std.process.Init) !void {
     defer group.cancel(io);
 
     const allocator = init.gpa;
+    // TODO: Can we make a hash map data structure that abstracts away the
+    // mutex locking and unlocking?
     var map: std.StringHashMap([]const u8) = .init(allocator);
     var mutex = std.Io.Mutex.init;
     defer {
@@ -82,14 +84,18 @@ fn handleConnection(
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
 
-    // Read the request message from the client
-    const lock_request = try readRequest(&reader.interface);
-    switch (lock_request.request_type) {
+    // Client current follows this simple ACQUIRE -> EXECUTE -> RELEASE
+    // pattern, but this will change when implementing the `list` command, for
+    // example.
+
+    // Read the acquire request message from the client
+    const acquireReq = try readRequest(&reader.interface);
+    switch (acquireReq.request_type) {
         nlock.LockRequestType.AcquireLock => {
             handleAcquireLockRequest(
                 io,
                 allocator,
-                lock_request,
+                acquireReq,
                 map,
                 mutex,
                 &writer.interface,
@@ -99,19 +105,19 @@ fn handleConnection(
             };
         },
         else => {
-            std.log.debug("Received unexpected request type: {d}", .{lock_request.request_type});
+            std.log.debug("Received unexpected request type: {d}", .{acquireReq.request_type});
             return error.UnexpectedRequestType;
         },
     }
 
     // The client executes the command and then sends a release lock request
-    const exec_request = try readRequest(&reader.interface);
-    switch (exec_request.request_type) {
+    const releaseReq = try readRequest(&reader.interface);
+    switch (releaseReq.request_type) {
         nlock.LockRequestType.ReleaseLock => {
             handleReleaseLockRequest(
                 io,
                 allocator,
-                exec_request,
+                releaseReq,
                 map,
                 mutex,
                 &writer.interface,
@@ -121,7 +127,7 @@ fn handleConnection(
             };
         },
         else => {
-            std.log.debug("Received unexpected request type: {d}", .{exec_request.request_type});
+            std.log.debug("Received unexpected request type: {d}", .{releaseReq.request_type});
             return error.UnexpectedRequestType;
         },
     }
