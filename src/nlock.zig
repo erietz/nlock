@@ -1,3 +1,7 @@
+// TODO: Need to handle ctrl-c and other signals to release the lock properly
+// TODO: Current implementation is non-blocking, but blocking should be the default
+//       and non-blocking should be put behind -n or --non-blocking flag
+
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
@@ -33,7 +37,6 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
         std.log.err("Failed to join command arguments", .{});
         return error.InvalidArguments;
     };
-    std.debug.print("Options: name={s}, global={}, command={s}.\n", .{ options.name, options.global, command_str });
 
     const address = try std.Io.net.UnixAddress.init(nlock.SOCKET_PATH);
     const stream = try address.connect(init.io);
@@ -60,8 +63,10 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
     if (lockResponse.status == nlock.LockResponseStatus.Busy) {
         return error.LockAlreadyAcquired;
     } else if (lockResponse.status == nlock.LockResponseStatus.Ok) {
-        std.debug.print("Lock acquired successfully. Executing command... {s}\n", .{command_str});
-        try runCommand(init.io, options.command);
+        runCommand(init.io, options.command) catch |err| {
+            std.debug.print("Failed to run command: {s}\n", .{@errorName(err)});
+            // Even if the command fails, we should still attempt to release the lock
+        };
 
         const release_message = nlock.LockRequest
             .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, command_str)
@@ -74,9 +79,7 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
             std.debug.print("Failed to parse release response: {s}\n", .{@errorName(err)});
             return err;
         };
-        if (releaseResponse.status == nlock.LockResponseStatus.Ok) {
-            std.debug.print("Lock released successfully.\n", .{});
-        } else {
+        if (releaseResponse.status != nlock.LockResponseStatus.Ok) {
             std.debug.print("Failed to release lock. Status: {d}\n", .{releaseResponse.status});
             return error.LockReleaseFailed;
         }
@@ -103,16 +106,16 @@ pub fn runCommand(io: Io, command: []const []const u8) !void {
 
     switch (term) {
         .exited => {
-            std.debug.print("Command exited with code: {d}\n", .{term.exited});
+            std.debug.print("Process exited with code: {d}\n", .{term.exited});
         },
         .signal => {
-            std.debug.print("Command terminated by signal: {d}\n", .{term.signal});
+            std.debug.print("Process terminated by signal: {d}\n", .{term.signal});
         },
         .stopped => {
-            std.debug.print("Command stopped by signal: {d}\n", .{term.signal});
+            std.debug.print("Process stopped by signal: {d}\n", .{term.signal});
         },
         .unknown => {
-            std.debug.print("Command terminated with unknown status.\n", .{});
+            std.debug.print("Process terminated with unknown status.\n", .{});
         },
     }
 }
