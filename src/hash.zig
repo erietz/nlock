@@ -37,7 +37,9 @@ pub fn ThreadSafeHashMap(comptime K: type, comptime V: type) type {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
             const gop = try self.map.getOrPut(key);
-            if (gop.found_existing) return gop.value_ptr.*;
+            if (gop.found_existing) {
+                return gop.value_ptr.*;
+            }
             gop.value_ptr.* = value;
             return null;
         }
