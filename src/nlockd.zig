@@ -31,14 +31,9 @@ pub fn runServer(init: std.process.Init) !void {
     defer group.cancel(io);
 
     const allocator = init.gpa;
-    // TODO: Can we make a hash map data structure that abstracts away the
-    // mutex locking and unlocking?
-    var map: std.StringHashMap([]const u8) = .init(allocator);
-    var mutex = std.Io.Mutex.init;
+    var mapWrap = nlock.ThreadSafeHashMap(io, []const u8, []const u8).init(allocator);
     defer {
-        var it = map.keyIterator();
-        while (it.next()) |key| allocator.free(key.*);
-        map.deinit();
+        mapWrap.deinit();
     }
 
     while (true) {
@@ -47,8 +42,7 @@ pub fn runServer(init: std.process.Init) !void {
             io,
             allocator,
             stream,
-            &map,
-            &mutex,
+            &mapWrap,
         }) catch |err| {
             std.log.err("Failed to spawn connection task: {s}", .{@errorName(err)});
             stream.close(io);
@@ -62,12 +56,16 @@ fn connectionTask(
     io: Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-    map: *std.StringHashMap([]const u8),
-    mutex: *std.Io.Mutex,
+    map: *nlock.ThreadSafeHashMap(Io, []const u8, []const u8),
 ) Io.Cancelable!void {
     defer stream.close(io);
 
-    handleConnection(io, allocator, stream, map, mutex) catch |err| {
+    handleConnection(
+        io,
+        allocator,
+        stream,
+        map,
+    ) catch |err| {
         std.log.debug("Connection error: {s}", .{@errorName(err)});
     };
 }
@@ -76,8 +74,7 @@ fn handleConnection(
     io: Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-    map: *std.StringHashMap([]const u8),
-    mutex: *std.Io.Mutex,
+    map: *nlock.ThreadSafeHashMap(Io, []const u8, []const u8),
 ) !void {
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(io, &read_buffer);
@@ -93,11 +90,9 @@ fn handleConnection(
     switch (acquireReq.request_type) {
         nlock.LockRequestType.AcquireLock => {
             handleAcquireLockRequest(
-                io,
                 allocator,
                 acquireReq,
                 map,
-                mutex,
                 &writer.interface,
             ) catch |err| {
                 std.log.debug("Failed to handle acquire lock request: {s}", .{@errorName(err)});
@@ -115,11 +110,9 @@ fn handleConnection(
     switch (releaseReq.request_type) {
         nlock.LockRequestType.ReleaseLock => {
             handleReleaseLockRequest(
-                io,
                 allocator,
                 releaseReq,
                 map,
-                mutex,
                 &writer.interface,
             ) catch |err| {
                 std.log.debug("Failed to handle release lock request: {s}", .{@errorName(err)});
@@ -142,19 +135,12 @@ fn readRequest(reader: *Io.Reader) !nlock.LockRequest {
 }
 
 fn handleAcquireLockRequest(
-    io: Io,
     allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest,
-    map: *std.StringHashMap([]const u8),
-    mutex: *std.Io.Mutex,
+    map: *nlock.ThreadSafeHashMap(Io, []const u8, []const u8),
     writer: *Io.Writer,
 ) !void {
-    mutex.lock(io) catch |err| {
-        std.log.err("Failed to acquire mutex lock: {s}", .{@errorName(err)});
-        return err;
-    };
     const existing_lock = map.get(lock_request.name);
-    mutex.unlock(io);
     if (existing_lock) |value| {
         std.log.info("Lock for name '{s}' is already acquired with value {s}", .{
             lock_request.name,
@@ -174,27 +160,19 @@ fn handleAcquireLockRequest(
     });
 
     const lock_name_copy = try allocator.dupe(u8, lock_request.name);
-    mutex.lock(io) catch |err| {
-        std.log.err("Failed to acquire mutex lock: {s}", .{@errorName(err)});
-        allocator.free(lock_name_copy);
-        return err;
-    };
     map.put(lock_name_copy, lock_request.command) catch |err| {
         allocator.free(lock_name_copy);
         return err;
     };
-    mutex.unlock(io);
 
     const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
     try nlock.writeLine(writer, lock_response);
 }
 
 fn handleReleaseLockRequest(
-    io: Io,
     allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest,
-    map: *std.StringHashMap([]const u8),
-    mutex: *std.Io.Mutex,
+    map: *nlock.ThreadSafeHashMap(Io, []const u8, []const u8),
     writer: *Io.Writer,
 ) !void {
     std.log.info("Releasing lock for name '{s}' (global: {})", .{
@@ -202,19 +180,13 @@ fn handleReleaseLockRequest(
         lock_request.global,
     });
 
-    mutex.lock(io) catch |err| {
-        std.log.err("Failed to acquire mutex lock: {s}", .{@errorName(err)});
-        return err;
-    };
     if (map.fetchRemove(lock_request.name)) |entry| {
-        mutex.unlock(io);
         allocator.free(entry.key);
         std.log.info("Lock for name '{s}' released successfully.", .{lock_request.name});
 
         const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
         try nlock.writeLine(writer, lock_response);
     } else {
-        mutex.unlock(io);
         std.log.err("No lock found for name '{s}' to release.", .{lock_request.name});
         // TODO: should this be a Busy response or an error? For now, we will send a Busy response.
         const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toString();

@@ -3,6 +3,7 @@ const Io = std.Io;
 const options = @import("options.zig");
 const cli = @import("cli.zig");
 const protocol = @import("protocol.zig");
+const hash = @import("hash.zig");
 
 pub const SOCKET_PATH = "/tmp/nlock.sock";
 pub const Command = options.Command;
@@ -13,6 +14,7 @@ pub const LockRequestType = protocol.LockRequestType;
 pub const LockRequest = protocol.LockRequest;
 pub const LockResponse = protocol.LockResponse;
 pub const writeLine = protocol.writeLine;
+pub const ThreadSafeHashMap = hash.ThreadSafeHashMap;
 
 test {
     _ = options;
