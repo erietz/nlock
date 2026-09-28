@@ -31,7 +31,7 @@ pub fn runServer(init: std.process.Init) !void {
     defer group.cancel(io);
 
     const allocator = init.gpa;
-    var mapWrap = nlock.ThreadSafeHashMap(io, []const u8, []const u8).init(allocator);
+    var mapWrap = nlock.ThreadSafeHashMap([]const u8, []const u8).init(io, allocator);
     defer {
         mapWrap.deinit();
     }
@@ -56,7 +56,7 @@ fn connectionTask(
     io: Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-    map: *nlock.ThreadSafeHashMap(Io, []const u8, []const u8),
+    map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
 ) Io.Cancelable!void {
     defer stream.close(io);
 
@@ -74,7 +74,7 @@ fn handleConnection(
     io: Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-    map: *nlock.ThreadSafeHashMap(Io, []const u8, []const u8),
+    map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
 ) !void {
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(io, &read_buffer);
@@ -137,7 +137,7 @@ fn readRequest(reader: *Io.Reader) !nlock.LockRequest {
 fn handleAcquireLockRequest(
     allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest,
-    map: *nlock.ThreadSafeHashMap(Io, []const u8, []const u8),
+    map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
     writer: *Io.Writer,
 ) !void {
     const existing_lock = map.get(lock_request.name);
@@ -172,7 +172,7 @@ fn handleAcquireLockRequest(
 fn handleReleaseLockRequest(
     allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest,
-    map: *nlock.ThreadSafeHashMap(Io, []const u8, []const u8),
+    map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
     writer: *Io.Writer,
 ) !void {
     std.log.info("Releasing lock for name '{s}' (global: {})", .{
