@@ -19,7 +19,7 @@ tmux split-window -v -t 2
 tmux split-window -v -t 2
 
 # Wait for the build to finish and the server to start
-sleep 5
+sleep 1
 
 # Send a command to the right pane from the client
 tmux send-keys -t 2 "./zig-out/bin/nlock run test -- sleep 5" C-m

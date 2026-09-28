@@ -44,11 +44,11 @@ pub fn runServer(init: std.process.Init) !void {
     defer group.cancel(io);
 
     while (true) {
-        const stream = try server.accept(io);
+        var stream = try server.accept(io);
         group.concurrent(io, connectionTask, .{
             io,
             allocator,
-            stream,
+            &stream,
             &mapWrap,
         }) catch |err| {
             std.log.err("Failed to spawn connection task: {s}", .{@errorName(err)});
@@ -57,16 +57,14 @@ pub fn runServer(init: std.process.Init) !void {
     }
 }
 
-/// Owns the stream for the lifetime of the connection and adapts
-/// `handleConnection` to the `Cancelable!void` signature `Io.Group` requires.
+/// Adapts `handleConnection` to the `Cancelable!void` signature `Io.Group`
+/// requires.
 fn connectionTask(
     io: Io,
     allocator: std.mem.Allocator,
-    stream: std.Io.net.Stream,
+    stream: *std.Io.net.Stream,
     map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
 ) Io.Cancelable!void {
-    defer stream.close(io);
-
     handleConnection(
         io,
         allocator,
@@ -80,9 +78,10 @@ fn connectionTask(
 fn handleConnection(
     io: Io,
     allocator: std.mem.Allocator,
-    stream: std.Io.net.Stream,
+    stream: *std.Io.net.Stream,
     map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
 ) !void {
+    defer stream.close(io);
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(io, &read_buffer);
     var write_buffer: [1024]u8 = undefined;
