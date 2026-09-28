@@ -26,15 +26,22 @@ pub fn runServer(init: std.process.Init) !void {
     defer server.deinit(io);
     std.log.info("Server started and listening on {s}", .{nlock.SOCKET_PATH});
 
+    const allocator = init.gpa;
+    var mapWrap = nlock.ThreadSafeHashMap([]const u8, []const u8).init(io, allocator);
+    // Declared before `group` so this runs after `group.cancel`: no connection
+    // tasks remain, so it is safe to walk the inner map without the mutex.
+    defer {
+        var it = mapWrap.map.iterator();
+        while (it.next()) |entry| {
+            allocator.free(entry.key_ptr.*);
+            allocator.free(entry.value_ptr.*);
+        }
+        mapWrap.deinit();
+    }
+
     // initialize structured task management group
     var group: Io.Group = .init;
     defer group.cancel(io);
-
-    const allocator = init.gpa;
-    var mapWrap = nlock.ThreadSafeHashMap([]const u8, []const u8).init(io, allocator);
-    defer {
-        mapWrap.deinit();
-    }
 
     while (true) {
         const stream = try server.accept(io);
@@ -142,17 +149,24 @@ fn handleAcquireLockRequest(
 ) !void {
     // Check and insert in one atomic step so two clients racing for the same
     // name cannot both acquire it.
+    // The map owns copies of both the name and the command: `lock_request`
+    // slices point into this connection's read buffer, which is reused by the
+    // next read and invalid once the connection ends.
     const lock_name_copy = try allocator.dupe(u8, lock_request.name);
-    const existing_lock = map.tryPut(lock_name_copy, lock_request.command) catch |err| {
+    const command_copy = allocator.dupe(u8, lock_request.command) catch |err| {
         allocator.free(lock_name_copy);
         return err;
     };
-    if (existing_lock) |value| {
+
+    const acquired = map.tryPut(lock_name_copy, command_copy) catch |err| {
         allocator.free(lock_name_copy);
-        std.log.info("Lock for name '{s}' is already acquired with value {s}", .{
-            lock_request.name,
-            value,
-        });
+        allocator.free(command_copy);
+        return err;
+    };
+    if (!acquired) {
+        allocator.free(lock_name_copy);
+        allocator.free(command_copy);
+        std.log.info("Lock for name '{s}' is already acquired", .{lock_request.name});
 
         const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toString();
 
@@ -183,6 +197,7 @@ fn handleReleaseLockRequest(
 
     if (map.fetchRemove(lock_request.name)) |entry| {
         allocator.free(entry.key);
+        allocator.free(entry.value);
         std.log.info("Lock for name '{s}' released successfully.", .{lock_request.name});
 
         const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
