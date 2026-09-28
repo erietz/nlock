@@ -140,8 +140,15 @@ fn handleAcquireLockRequest(
     map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
     writer: *Io.Writer,
 ) !void {
-    const existing_lock = map.get(lock_request.name);
+    // Check and insert in one atomic step so two clients racing for the same
+    // name cannot both acquire it.
+    const lock_name_copy = try allocator.dupe(u8, lock_request.name);
+    const existing_lock = map.tryPut(lock_name_copy, lock_request.command) catch |err| {
+        allocator.free(lock_name_copy);
+        return err;
+    };
     if (existing_lock) |value| {
+        allocator.free(lock_name_copy);
         std.log.info("Lock for name '{s}' is already acquired with value {s}", .{
             lock_request.name,
             value,
@@ -153,17 +160,11 @@ fn handleAcquireLockRequest(
         return error.LockAlreadyAcquired;
     }
 
-    std.log.info("Acquiring lock for name '{s}' (global: {}). Command: {s}", .{
+    std.log.info("Acquired lock for name '{s}' (global: {}). Command: {s}", .{
         lock_request.name,
         lock_request.global,
         lock_request.command,
     });
-
-    const lock_name_copy = try allocator.dupe(u8, lock_request.name);
-    map.put(lock_name_copy, lock_request.command) catch |err| {
-        allocator.free(lock_name_copy);
-        return err;
-    };
 
     const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
     try nlock.writeLine(writer, lock_response);
