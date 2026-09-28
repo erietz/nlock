@@ -30,6 +30,18 @@ pub fn ThreadSafeHashMap(comptime K: type, comptime V: type) type {
             try self.map.put(key, value);
         }
 
+        /// Inserts `key` only if it is not already present, as a single atomic
+        /// operation. Returns null on insert, or the existing value if `key`
+        /// was already present (in which case the map is unchanged).
+        pub fn tryPut(self: *Self, key: K, value: V) !?V {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            const gop = try self.map.getOrPut(key);
+            if (gop.found_existing) return gop.value_ptr.*;
+            gop.value_ptr.* = value;
+            return null;
+        }
+
         pub fn get(self: *Self, key: K) ?V {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
