@@ -107,7 +107,7 @@ fn handleConnection(
             };
         },
         nlock.LockRequestType.ListLocks => {
-            std.log.debug("Received list locks request\n", .{});
+            std.log.debug("Received list locks request", .{});
             handleListLocksRequest(map, &writer.interface) catch |err| {
                 std.log.debug("Failed to handle list locks request: {s}", .{@errorName(err)});
                 return err;
