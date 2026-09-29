@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -euo pipefail
+
 zig build
 
 # open a new tmux window and split the window into two panes
@@ -22,9 +24,11 @@ sleep 2
 
 # Send a command to the right pane from the client
 tmux send-keys -t 2 "./zig-out/bin/nlock run test -- sleep 3" C-m
+sleep 1
 
 # Send a command to the bottom right pane from the client
 tmux send-keys -t 3 "./zig-out/bin/nlock run test -- sleep 3" C-m
+sleep 1
 
 # Send a command to the bottom right pane from the client
 tmux send-keys -t 4 "./zig-out/bin/nlock run test -- sleep 3" C-m
