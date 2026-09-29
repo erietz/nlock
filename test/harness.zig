@@ -53,18 +53,43 @@ pub const Daemon = struct {
     /// Runs `nlock` with `args` against this daemon and collects its output.
     /// Caller owns `stdout` and `stderr` of the result.
     pub fn client(self: *Daemon, gpa: std.mem.Allocator, io: Io, args: []const []const u8) !std.process.RunResult {
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(gpa);
-        try argv.append(gpa, build_options.nlock_path);
-        try argv.appendSlice(gpa, args);
+        const argv = try clientArgv(gpa, args);
+        defer gpa.free(argv);
 
         return std.process.run(gpa, io, .{
-            .argv = argv.items,
+            .argv = argv,
             .environ_map = &self.environ,
             .timeout = .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } },
         });
     }
+
+    /// Starts `nlock` with `args` against this daemon without waiting for it.
+    /// Caller must `wait` (or `kill`) the returned child.
+    pub fn spawnClient(self: *Daemon, gpa: std.mem.Allocator, io: Io, args: []const []const u8) !std.process.Child {
+        const argv = try clientArgv(gpa, args);
+        defer gpa.free(argv);
+
+        return std.process.spawn(io, .{
+            .argv = argv,
+            .environ_map = &self.environ,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        });
+    }
+
+    /// Returns the path of `name` inside this daemon's temporary directory,
+    /// relative to the cwd shared with child processes. Caller owns the result.
+    pub fn tmpPath(self: *Daemon, gpa: std.mem.Allocator, name: []const u8) ![]u8 {
+        return std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ self.tmp.sub_path, name });
+    }
 };
+
+fn clientArgv(gpa: std.mem.Allocator, args: []const []const u8) ![]const []const u8 {
+    const argv = try gpa.alloc([]const u8, args.len + 1);
+    argv[0] = build_options.nlock_path;
+    @memcpy(argv[1..], args);
+    return argv;
+}
 
 /// Polls until something accepts connections on `socket_path`, or gives up
 /// after roughly five seconds.
