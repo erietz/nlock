@@ -161,6 +161,35 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
+    // Integration tests spawn the real nlockd/nlock binaries as child
+    // processes. `addOptionPath` passes their paths to the test via the
+    // `build_options` module and makes sure both are built first.
+    const integration_options = b.addOptions();
+    integration_options.addOptionPath("nlock_path", nlock_exe.getEmittedBin());
+    integration_options.addOptionPath("nlockd_path", nlockd_exe.getEmittedBin());
+
+    const integration_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/integration.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "build_options", .module = integration_options.createModule() },
+                .{ .name = "nlock", .module = mod },
+            },
+        }),
+    });
+
+    const run_integration_tests = b.addRunArtifact(integration_tests);
+    // Spawns processes and sockets, so never serve the result from cache.
+    run_integration_tests.has_side_effects = true;
+
+    const integration_step = b.step("test-integration", "Run integration tests");
+    integration_step.dependOn(&run_integration_tests.step);
+
+    // Optionally include them in `zig build test` too:
+    // test_step.dependOn(&run_integration_tests.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
