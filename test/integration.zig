@@ -33,6 +33,52 @@ test "lock can be reacquired after it is released" {
     }
 }
 
+test "second client waits until the held lock is released" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const log_path = try daemon.tmpPath(gpa, "log");
+    defer gpa.free(log_path);
+    const go_path = try daemon.tmpPath(gpa, "go");
+    defer gpa.free(go_path);
+
+    // Client A takes the lock and holds it until the test creates `go`.
+    const script_a = try std.fmt.allocPrint(
+        gpa,
+        "echo a-start >> {0s}; while [ ! -f {1s} ]; do sleep 0.01; done; echo a-end >> {0s}",
+        .{ log_path, go_path },
+    );
+    defer gpa.free(script_a);
+    var client_a = try daemon.spawnClient(gpa, io, &.{ "run", "mylock", "--", "sh", "-c", script_a });
+    var a_done = false;
+    defer if (!a_done) client_a.kill(io);
+
+    try waitForFileContents(gpa, io, daemon.tmp.dir, "log", "a-start\n");
+
+    // Client B asks for the same lock and should queue behind A.
+    const script_b = try std.fmt.allocPrint(gpa, "echo b >> {s}", .{log_path});
+    defer gpa.free(script_b);
+    var client_b = try daemon.spawnClient(gpa, io, &.{ "run", "mylock", "--", "sh", "-c", script_b });
+    var b_done = false;
+    defer if (!b_done) client_b.kill(io);
+
+    // Give B time to reach the daemon; it must not run while A holds the lock.
+    try io.sleep(.fromMilliseconds(300), .awake);
+    try expectFileContents(gpa, io, daemon.tmp.dir, "log", "a-start\n");
+
+    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
+
+    a_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_a.wait(io));
+    b_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_b.wait(io));
+
+    try expectFileContents(gpa, io, daemon.tmp.dir, "log", "a-start\na-end\nb\n");
+}
+
 test "list succeeds with no locks held" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -64,4 +110,27 @@ test "client fails when no daemon is running" {
     defer gpa.free(result.stderr);
 
     try std.testing.expectEqual(Term{ .exited = 1 }, result.term);
+}
+
+fn expectFileContents(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, expected: []const u8) !void {
+    const actual = try dir.readFileAlloc(io, sub_path, gpa, .limited(4096));
+    defer gpa.free(actual);
+    try std.testing.expectEqualStrings(expected, actual);
+}
+
+/// Polls until `sub_path` exists with exactly `expected` contents, or gives up
+/// after roughly five seconds.
+fn waitForFileContents(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, expected: []const u8) !void {
+    var attempts: usize = 0;
+    while (attempts < 500) : (attempts += 1) {
+        if (dir.readFileAlloc(io, sub_path, gpa, .limited(4096))) |actual| {
+            defer gpa.free(actual);
+            if (std.mem.eql(u8, expected, actual)) return;
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+    return expectFileContents(gpa, io, dir, sub_path, expected);
 }
