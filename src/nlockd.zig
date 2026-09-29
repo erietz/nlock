@@ -27,16 +27,16 @@ pub fn runServer(init: std.process.Init) !void {
     std.log.info("Server started and listening on {s}", .{nlock.SOCKET_PATH});
 
     const allocator = init.gpa;
-    var mapWrap = nlock.ThreadSafeHashMap([]const u8, []const u8).init(io, allocator);
+    var map = nlock.ThreadSafeHashMap([]const u8, nlock.Lock).init(io, allocator);
     // Declared before `group` so this runs after `group.cancel`: no connection
     // tasks remain, so it is safe to walk the inner map without the mutex.
     defer {
-        var it = mapWrap.map.iterator();
+        var it = map.map.iterator();
         while (it.next()) |entry| {
             allocator.free(entry.key_ptr.*);
-            allocator.free(entry.value_ptr.*);
+            allocator.free(entry.value_ptr.*.command);
         }
-        mapWrap.deinit();
+        map.deinit();
     }
 
     // initialize structured task management group
@@ -48,8 +48,8 @@ pub fn runServer(init: std.process.Init) !void {
         group.concurrent(io, connectionTask, .{
             io,
             allocator,
-            &stream,
-            &mapWrap,
+            stream,
+            &map,
         }) catch |err| {
             std.log.err("Failed to spawn connection task: {s}", .{@errorName(err)});
             stream.close(io);
@@ -62,8 +62,8 @@ pub fn runServer(init: std.process.Init) !void {
 fn connectionTask(
     io: Io,
     allocator: std.mem.Allocator,
-    stream: *std.Io.net.Stream,
-    map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
+    stream: std.Io.net.Stream,
+    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
 ) Io.Cancelable!void {
     handleConnection(
         io,
@@ -78,8 +78,8 @@ fn connectionTask(
 fn handleConnection(
     io: Io,
     allocator: std.mem.Allocator,
-    stream: *std.Io.net.Stream,
-    map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
+    stream: std.Io.net.Stream,
+    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
 ) !void {
     defer stream.close(io);
     var read_buffer: [1024]u8 = undefined;
@@ -96,6 +96,7 @@ fn handleConnection(
     switch (acquireReq.request_type) {
         nlock.LockRequestType.AcquireLock => {
             handleAcquireLockRequest(
+                io,
                 allocator,
                 acquireReq,
                 map,
@@ -116,7 +117,8 @@ fn handleConnection(
     switch (releaseReq.request_type) {
         nlock.LockRequestType.ReleaseLock => {
             handleReleaseLockRequest(
-                allocator,
+                io,
+                // allocator,
                 releaseReq,
                 map,
                 &writer.interface,
@@ -141,9 +143,10 @@ fn readRequest(reader: *Io.Reader) !nlock.LockRequest {
 }
 
 fn handleAcquireLockRequest(
+    io: Io,
     allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest,
-    map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
+    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
 ) !void {
     // Check and insert in one atomic step so two clients racing for the same
@@ -157,20 +160,35 @@ fn handleAcquireLockRequest(
         return err;
     };
 
-    const acquired = map.tryPut(lock_name_copy, command_copy) catch |err| {
+    const lock = nlock.Lock{
+        .command = command_copy,
+    };
+
+    const acquired = map.tryPut(lock_name_copy, lock) catch |err| {
         allocator.free(lock_name_copy);
         allocator.free(command_copy);
         return err;
     };
     if (!acquired) {
-        allocator.free(lock_name_copy);
-        allocator.free(command_copy);
         std.log.info("Lock for name '{s}' is already acquired", .{lock_request.name});
 
-        const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toString();
+        var existing_lock = map.getPtr(lock_name_copy) orelse {
+            std.log.err("Lock for name '{s}' was removed before we could add a waiter", .{lock_request.name});
+            return error.LockAlreadyAcquired;
+        };
+        var waiter = nlock.Waiter{
+            .event = .unset,
+            .command = command_copy,
+        };
+        existing_lock.waiters.append(&waiter.node);
+        // wait for the lock to be released
+        try waiter.event.wait(io);
 
+        // After being signaled, the lock has been released.
+        std.log.info("Lock for name '{s}' has been released", .{lock_request.name});
+
+        const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
         try nlock.writeLine(writer, lock_response);
-        return error.LockAlreadyAcquired;
     }
 
     std.log.info("Acquired lock for name '{s}' (global: {}). Command: {s}", .{
@@ -184,9 +202,10 @@ fn handleAcquireLockRequest(
 }
 
 fn handleReleaseLockRequest(
-    allocator: std.mem.Allocator,
+    io: Io,
+    // allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest,
-    map: *nlock.ThreadSafeHashMap([]const u8, []const u8),
+    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
 ) !void {
     std.log.info("Releasing lock for name '{s}' (global: {})", .{
@@ -194,9 +213,22 @@ fn handleReleaseLockRequest(
         lock_request.global,
     });
 
-    if (map.fetchRemove(lock_request.name)) |entry| {
-        allocator.free(entry.key);
-        allocator.free(entry.value);
+    if (map.getPtr(lock_request.name)) |lockPtr| {
+
+        // need to fix this
+        //
+        // src/nlockd.zig:221:25: error: expected type '*DoublyLinkedList', found '*const DoublyLinkedList'
+
+        if (lockPtr.waiters.popFirst()) |waiter_node| {
+            var w: *nlock.Waiter = @fieldParentPtr("node", waiter_node);
+            lockPtr.command = w.command; // Update the lock's command to the waiter's command
+            // Signal the waiter that the lock has been released
+            w.event.set(io);
+        } else {
+            _ = map.remove(lock_request.name);
+            // allocator.free(lockPtr.command);
+        }
+
         std.log.info("Lock for name '{s}' released successfully.", .{lock_request.name});
 
         const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();

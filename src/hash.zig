@@ -52,6 +52,12 @@ pub fn ThreadSafeHashMap(comptime K: type, comptime V: type) type {
             return self.map.get(key);
         }
 
+        pub fn getPtr(self: *Self, key: K) ?*V {
+            self.mutex.lockUncancelable(self.io);
+            defer self.mutex.unlock(self.io);
+            return self.map.getPtr(key);
+        }
+
         pub fn remove(self: *Self, key: K) bool {
             self.mutex.lockUncancelable(self.io);
             defer self.mutex.unlock(self.io);
