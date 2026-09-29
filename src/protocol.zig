@@ -10,6 +10,7 @@ pub const LockResponseStatus = enum {
 pub const LockRequestType = enum {
     AcquireLock,
     ReleaseLock,
+    ListLocks,
 };
 
 pub const LockRequest = struct {
@@ -59,6 +60,7 @@ pub const LockRequest = struct {
                 const request_type = switch (try std.fmt.parseInt(u8, part, 10)) {
                     0 => LockRequestType.AcquireLock,
                     1 => LockRequestType.ReleaseLock,
+                    2 => LockRequestType.ListLocks,
                     else => return error.InvalidRequestType,
                 };
                 lock_request.request_type = request_type;

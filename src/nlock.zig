@@ -28,7 +28,7 @@ pub fn run(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     switch (try nlock.Command.parseArgs(args)) {
         .run => |options| try runLocked(init, options),
-        .list => return error.NotImplemented,
+        .list => try runList(init),
     }
 }
 
@@ -75,6 +75,43 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
     } else {
         std.debug.print("Received unknown lock response status.\n", .{});
         return error.UnknownLockResponse;
+    }
+}
+
+pub fn runList(init: std.process.Init) !void {
+    const address = try std.Io.net.UnixAddress.init(nlock.SOCKET_PATH);
+    const stream = try address.connect(init.io);
+    defer stream.close(init.io);
+
+    var write_buffer: [1024]u8 = undefined;
+    var writer = stream.writer(init.io, &write_buffer);
+
+    var read_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(init.io, &read_buffer);
+
+    const list_message = nlock.LockRequest
+        .init(nlock.LockRequestType.ListLocks, "", false, "")
+        .toString();
+
+    try nlock.writeLine(&writer.interface, list_message);
+
+    while (true) {
+        const response_message = (try reader.interface.takeDelimiter('\n')) orelse break;
+
+        const lock_request = nlock.LockRequest.fromString(response_message) catch |err| {
+            std.debug.print("Failed to parse response: {s}\n", .{@errorName(err)});
+            return err;
+        };
+
+        nlock.printAnotherMessage(&writer.interface) catch |err| {
+            std.debug.print("Failed to print another message: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        std.log.info("Lock Name: {s}, Global: {}, Command: {s}", .{
+            lock_request.name,
+            lock_request.global,
+            lock_request.command,
+        });
     }
 }
 
