@@ -51,12 +51,14 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
     );
 
     if (acquireStatus == nlock.LockResponseStatus.Ok) {
+        std.log.debug("Lock acquired successfully. Running command\n", .{});
         runCommand(init.io, options.command) catch |err| {
             // Even if the command fails, we should still attempt to release
             // the lock so no return error here, just log the error
             std.debug.print("Failed to run command: {s}\n", .{@errorName(err)});
         };
 
+        std.log.debug("Command finished. Releasing lock: {s}\n", .{options.name});
         const releaseStatus = try releaseLock(
             init.arena.allocator(),
             &writer.interface,

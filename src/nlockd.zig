@@ -113,12 +113,13 @@ fn handleConnection(
     }
 
     // The client executes the command and then sends a release lock request
+    std.log.debug("Waiting for release lock request from client\n", .{});
     const releaseReq = try readRequest(&reader.interface);
     switch (releaseReq.request_type) {
         nlock.LockRequestType.ReleaseLock => {
             handleReleaseLockRequest(
                 io,
-                // allocator,
+                allocator,
                 releaseReq,
                 map,
                 &writer.interface,
@@ -159,6 +160,8 @@ fn handleAcquireLockRequest(
         allocator.free(lock_name_copy);
         return err;
     };
+    // defer allocator.free(lock_name_copy);
+    // defer allocator.free(command_copy);
 
     const lock = nlock.Lock{
         .command = command_copy,
@@ -169,41 +172,43 @@ fn handleAcquireLockRequest(
         allocator.free(command_copy);
         return err;
     };
-    if (!acquired) {
-        std.log.info("Lock for name '{s}' is already acquired", .{lock_request.name});
 
+    if (acquired) {
+        std.log.info("Acquired lock for name '{s}' (global: {}). Command: {s}", .{
+            lock_request.name,
+            lock_request.global,
+            lock_request.command,
+        });
+    } else {
+        std.log.info("Lock for name '{s}' is already acquired", .{lock_name_copy});
+        // TODO: almost feel like we need manual control of the mutex from
+        // above, so that we can do a get and then a put in the same section.
+        // There is still a race condition here.
         var existing_lock = map.getPtr(lock_name_copy) orelse {
-            std.log.err("Lock for name '{s}' was removed before we could add a waiter", .{lock_request.name});
+            std.log.err("Lock for name '{s}' was removed before we could add a waiter", .{lock_name_copy});
             return error.LockAlreadyAcquired;
         };
         var waiter = nlock.Waiter{
             .event = .unset,
             .command = command_copy,
         };
+        // Queue up the command to be executed when the acquired lock is
+        // released
         existing_lock.waiters.append(&waiter.node);
-        // wait for the lock to be released
+        // Wait for the lock to be released. This does not happen until the
+        // client sends a release lock request, which will signal this waiter.
+        std.log.debug("Waiting for lock '{s}' to be released\n", .{lock_name_copy});
         try waiter.event.wait(io);
-
-        // After being signaled, the lock has been released.
-        std.log.info("Lock for name '{s}' has been released", .{lock_request.name});
-
-        const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
-        try nlock.writeLine(writer, lock_response);
     }
 
-    std.log.info("Acquired lock for name '{s}' (global: {}). Command: {s}", .{
-        lock_request.name,
-        lock_request.global,
-        lock_request.command,
-    });
-
-    const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
-    try nlock.writeLine(writer, lock_response);
+    std.log.info("Sending acquired response for lock {s}.", .{lock_name_copy});
+    const acquired_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
+    try nlock.writeLine(writer, acquired_response);
 }
 
 fn handleReleaseLockRequest(
     io: Io,
-    // allocator: std.mem.Allocator,
+    allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest,
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
@@ -213,30 +218,23 @@ fn handleReleaseLockRequest(
         lock_request.global,
     });
 
-    if (map.getPtr(lock_request.name)) |lockPtr| {
-
-        // need to fix this
-        //
-        // src/nlockd.zig:221:25: error: expected type '*DoublyLinkedList', found '*const DoublyLinkedList'
-
-        if (lockPtr.waiters.popFirst()) |waiter_node| {
+    if (map.getPtr(lock_request.name)) |lock_ptr| {
+        if (lock_ptr.waiters.popFirst()) |waiter_node| {
             var w: *nlock.Waiter = @fieldParentPtr("node", waiter_node);
-            lockPtr.command = w.command; // Update the lock's command to the waiter's command
+            lock_ptr.command = w.command; // Update the lock's command to the waiter's command
             // Signal the waiter that the lock has been released
             w.event.set(io);
+            // allocator.free(w.command); // Free the waiter's command after signaling
         } else {
+            allocator.free(lock_ptr.command);
             _ = map.remove(lock_request.name);
-            // allocator.free(lockPtr.command);
         }
 
         std.log.info("Lock for name '{s}' released successfully.", .{lock_request.name});
-
         const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
         try nlock.writeLine(writer, lock_response);
     } else {
         std.log.err("No lock found for name '{s}' to release.", .{lock_request.name});
-        // TODO: should this be a Busy response or an error? For now, we will send a Busy response.
-        const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toString();
-        try nlock.writeLine(writer, lock_response);
+        return error.LockNotFound;
     }
 }
