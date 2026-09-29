@@ -92,13 +92,13 @@ fn handleConnection(
     // example.
 
     // Read the acquire request message from the client
-    const acquireReq = try readRequest(&reader.interface);
-    switch (acquireReq.request_type) {
+    const req = try readRequest(&reader.interface);
+    switch (req.request_type) {
         nlock.LockRequestType.AcquireLock => {
             handleAcquireLockRequest(
                 io,
                 allocator,
-                acquireReq,
+                req,
                 map,
                 &writer.interface,
             ) catch |err| {
@@ -106,21 +106,29 @@ fn handleConnection(
                 return err;
             };
         },
+        nlock.LockRequestType.ListLocks => {
+            std.log.debug("Received list locks request\n", .{});
+            handleListLocksRequest(map, &writer.interface) catch |err| {
+                std.log.debug("Failed to handle list locks request: {s}", .{@errorName(err)});
+                return err;
+            };
+            return;
+        },
         else => {
-            std.log.debug("Received unexpected request type: {d}", .{acquireReq.request_type});
+            std.log.debug("Received unexpected request type: {d}", .{req.request_type});
             return error.UnexpectedRequestType;
         },
     }
 
     // The client executes the command and then sends a release lock request
     std.log.debug("Waiting for release lock request from client\n", .{});
-    const releaseReq = try readRequest(&reader.interface);
-    switch (releaseReq.request_type) {
+    const release_req = try readRequest(&reader.interface);
+    switch (release_req.request_type) {
         nlock.LockRequestType.ReleaseLock => {
             handleReleaseLockRequest(
                 io,
                 allocator,
-                releaseReq,
+                release_req,
                 map,
                 &writer.interface,
             ) catch |err| {
@@ -129,7 +137,7 @@ fn handleConnection(
             };
         },
         else => {
-            std.log.debug("Received unexpected request type: {d}", .{releaseReq.request_type});
+            std.log.debug("Received unexpected request type: {d}", .{release_req.request_type});
             return error.UnexpectedRequestType;
         },
     }
@@ -236,5 +244,25 @@ fn handleReleaseLockRequest(
     } else {
         std.log.err("No lock found for name '{s}' to release.", .{lock_request.name});
         return error.LockNotFound;
+    }
+}
+
+fn handleListLocksRequest(
+    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    writer: *Io.Writer,
+) !void {
+    var it = map.map.iterator();
+    while (it.next()) |entry| {
+        const lock_name = entry.key_ptr.*;
+        const lock_command = entry.value_ptr.*.command;
+
+        const lock_info = nlock.LockRequest.init(
+            nlock.LockRequestType.AcquireLock,
+            lock_name,
+            false,
+            lock_command,
+        ).toString();
+
+        try nlock.writeLine(writer, lock_info);
     }
 }
