@@ -13,18 +13,19 @@ pub fn run(init: std.process.Init) !void {
 
 pub fn runServer(init: std.process.Init) !void {
     const io = init.io;
+    const socket_path = nlock.socketPath(init.environ_map);
 
-    std.Io.Dir.cwd().deleteFile(io, nlock.SOCKET_PATH) catch |err| switch (err) {
+    std.Io.Dir.cwd().deleteFile(io, socket_path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    defer std.Io.Dir.cwd().deleteFile(io, nlock.SOCKET_PATH) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, socket_path) catch {};
 
-    const address = try std.Io.net.UnixAddress.init(nlock.SOCKET_PATH);
+    const address = try std.Io.net.UnixAddress.init(socket_path);
 
     var server = try address.listen(io, .{});
     defer server.deinit(io);
-    std.log.info("Server started and listening on {s}", .{nlock.SOCKET_PATH});
+    std.log.info("Server started and listening on {s}", .{socket_path});
 
     const allocator = init.gpa;
     var map = nlock.ThreadSafeHashMap([]const u8, nlock.Lock).init(io, allocator);

@@ -33,7 +33,7 @@ pub fn run(init: std.process.Init) !void {
 }
 
 pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
-    const address = try std.Io.net.UnixAddress.init(nlock.SOCKET_PATH);
+    const address = try std.Io.net.UnixAddress.init(nlock.socketPath(init.environ_map));
     const stream = try address.connect(init.io);
     defer stream.close(init.io);
 
@@ -79,7 +79,7 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
 }
 
 pub fn runList(init: std.process.Init) !void {
-    const address = try std.Io.net.UnixAddress.init(nlock.SOCKET_PATH);
+    const address = try std.Io.net.UnixAddress.init(nlock.socketPath(init.environ_map));
     const stream = try address.connect(init.io);
     defer stream.close(init.io);
 
