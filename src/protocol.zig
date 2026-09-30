@@ -19,7 +19,12 @@ pub const LockRequest = struct {
     global: bool,
     command: []const u8,
 
-    pub fn init(request_type: LockRequestType, name: []const u8, global: bool, command: []const u8) LockRequest {
+    pub fn init(
+        request_type: LockRequestType,
+        name: []const u8,
+        global: bool,
+        command: []const u8,
+    ) LockRequest {
         return LockRequest{
             .request_type = request_type,
             .name = name,
@@ -28,121 +33,114 @@ pub const LockRequest = struct {
         };
     }
 
-    pub fn toString(self: LockRequest) []const u8 {
-        return std.fmt.allocPrint(
-            std.heap.page_allocator,
-            "{d}:{s}:{}:{s}",
-            .{
-                @intFromEnum(self.request_type),
-                self.name,
-                self.global,
-                self.command,
-            },
-        ) catch unreachable;
+    pub fn toJson(
+        self: LockRequest,
+        allocator: std.mem.Allocator,
+    ) ![]u8 {
+        const json = try std.json.Stringify.valueAlloc(
+            allocator,
+            self,
+            .{ .whitespace = .minified },
+        );
+        return json;
     }
 
-    pub fn fromString(bytes: []const u8) !LockRequest {
-        if (bytes.len == 0) {
-            return error.InvalidRequestFormat;
-        }
-
-        var lock_request = LockRequest{
-            .request_type = LockRequestType.AcquireLock,
-            .name = "",
-            .global = false,
-            .command = "",
-        };
-
-        var parts = std.mem.splitScalar(u8, bytes, ':');
-        var i: usize = 0;
-        while (parts.next()) |part| {
-            if (i == 0) {
-                const request_type = switch (try std.fmt.parseInt(u8, part, 10)) {
-                    0 => LockRequestType.AcquireLock,
-                    1 => LockRequestType.ReleaseLock,
-                    2 => LockRequestType.ListLocks,
-                    else => return error.InvalidRequestType,
-                };
-                lock_request.request_type = request_type;
-            } else if (i == 1) {
-                lock_request.name = part;
-            } else if (i == 2) {
-                if (std.mem.eql(u8, part, "true")) {
-                    lock_request.global = true;
-                } else if (std.mem.eql(u8, part, "false")) {
-                    lock_request.global = false;
-                } else {
-                    return error.InvalidGlobalFlag;
-                }
-            } else if (i == 3) {
-                lock_request.command = part;
-            } else {
-                return error.InvalidRequestFormat;
-            }
-
-            i += 1;
-        }
-
-        return lock_request;
+    pub fn fromJson(
+        bytes: []const u8,
+        allocator: std.mem.Allocator,
+    ) !std.json.Parsed(LockRequest) {
+        const parsed = try std.json.parseFromSlice(
+            LockRequest,
+            allocator,
+            bytes,
+            .{},
+        );
+        return parsed;
     }
 };
 
-test "lockRequestToBytes serializes LockRequest correctly" {
+test "LockRequest.toJson serializes LockRequest correctly" {
+    const allocator = std.testing.allocator;
     const request = LockRequest{
         .request_type = LockRequestType.AcquireLock,
         .name = "mylock",
         .global = true,
         .command = "echo Hello",
     };
-    const bytes = request.toString();
-    try std.testing.expectEqualStrings("0:mylock:true:echo Hello", bytes);
+    const expected = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"command\":\"echo Hello\"}";
+
+    const json = try request.toJson(allocator);
+    defer allocator.free(json);
+
+    try std.testing.expectEqualStrings(expected, json);
 }
 
-test "lockRequestToBytes serializes LockRequest with ReleaseLock correctly" {
-    const request = LockRequest{
-        .request_type = LockRequestType.ReleaseLock,
+test "LockRequest.fromJson deserializes JSON into LockRequest correctly" {
+    const allocator = std.testing.allocator;
+    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"command\":\"echo Hello\"}";
+    const expected = LockRequest{
+        .request_type = LockRequestType.AcquireLock,
         .name = "mylock",
-        .global = false,
+        .global = true,
         .command = "echo Hello",
     };
-    const bytes = request.toString();
-    try std.testing.expectEqualStrings("1:mylock:false:echo Hello", bytes);
+
+    const parsed = try LockRequest.fromJson(json, allocator);
+    defer parsed.deinit();
+    const request = parsed.value;
+
+    try std.testing.expectEqual(request.request_type, expected.request_type);
+    try std.testing.expectEqualStrings(request.name, expected.name);
+    try std.testing.expectEqual(request.global, expected.global);
+    try std.testing.expectEqualStrings(request.command, expected.command);
 }
 
-test "bytesToLockRequest deserializes bytes into LockRequest correctly" {
-    const bytes = "0:mylock:true:echo Hello";
-    const request = try LockRequest.fromString(bytes);
-    try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(request.request_type));
-    try std.testing.expectEqualStrings("mylock", request.name);
-    try std.testing.expectEqual(true, request.global);
-    try std.testing.expectEqualStrings("echo Hello", request.command);
+test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
+    const allocator = std.testing.allocator;
+    const original = LockRequest{
+        .request_type = LockRequestType.AcquireLock,
+        .name = "mylock",
+        .global = true,
+        .command = "echo Hello",
+    };
+
+    const json = try original.toJson(allocator);
+    defer allocator.free(json);
+
+    const parsed = try LockRequest.fromJson(json, allocator);
+    defer parsed.deinit();
+    const request = parsed.value;
+
+    try std.testing.expectEqual(request.request_type, original.request_type);
+    try std.testing.expectEqualStrings(request.name, original.name);
+    try std.testing.expectEqual(request.global, original.global);
+    try std.testing.expectEqualStrings(request.command, original.command);
 }
 
-test "bytesToLockRequest deserializes bytes into LockRequest with ReleaseLock correctly" {
-    const bytes = "1:mylock:false:echo Hello";
-    const request = try LockRequest.fromString(bytes);
-    try std.testing.expectEqual(@intFromEnum(LockRequestType.ReleaseLock), @intFromEnum(request.request_type));
-    try std.testing.expectEqualStrings("mylock", request.name);
-    try std.testing.expectEqual(false, request.global);
-    try std.testing.expectEqualStrings("echo Hello", request.command);
+test "LockRequest.fromJson correctly handles colon in command" {
+    const allocator = std.testing.allocator;
+    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"command\":\"echo Hello:World\"}";
+    const request = try LockRequest.fromJson(json, allocator);
+    defer request.deinit();
+    const lock_request = request.value;
+
+    try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(lock_request.request_type));
+    try std.testing.expectEqualStrings("mylock", lock_request.name);
+    try std.testing.expectEqual(true, lock_request.global);
+    try std.testing.expectEqualStrings("echo Hello:World", lock_request.command);
 }
 
-test "bytesToLockRequest correctly handles colon in command" {
-    const bytes = "0:mylock:true:echo Hello:World";
-    const request = try LockRequest.fromString(bytes);
-    try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(request.request_type));
-    try std.testing.expectEqualStrings("mylock", request.name);
-    try std.testing.expectEqual(true, request.global);
-    try std.testing.expectEqualStrings("echo Hello:World", request.command);
-}
+test "LockRequest.fromJson correctly handles newline in command" {
+    const allocator = std.testing.allocator;
+    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"command\":\"echo Hello\\nWorld\"}";
+    const request = try LockRequest.fromJson(json, allocator);
+    defer request.deinit();
+    const lock_request = request.value;
 
-test "bytesToLockRequest correctly handles newline in command" {
-    const bytes = "0:mylock:true:echo Hello\nWorld";
-    const request = try LockRequest.fromString(bytes);
-    try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(request.request_type));
-    try std.testing.expectEqualStrings("mylock", request.name);
-    try std.testing.expectEqual(true, request.global);
-    try std.testing.expectEqualStrings("echo Hello\nWorld", request.command);
+    try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(lock_request.request_type));
+    try std.testing.expectEqualStrings("mylock", lock_request.name);
+    try std.testing.expectEqual(true, lock_request.global);
+    try std.testing.expectEqualStrings("echo Hello\nWorld", lock_request.command);
 }
 
 pub const LockResponse = struct {
@@ -154,26 +152,74 @@ pub const LockResponse = struct {
         };
     }
 
-    pub fn toString(self: LockResponse) []const u8 {
-        return std.fmt.allocPrint(
-            std.heap.page_allocator,
-            "{d}",
-            .{@intFromEnum(self.status)},
-        ) catch unreachable;
+    pub fn toJson(
+        self: LockResponse,
+        allocator: std.mem.Allocator,
+    ) ![]u8 {
+        const json = try std.json.Stringify.valueAlloc(
+            allocator,
+            self,
+            .{ .whitespace = .minified },
+        );
+        return json;
     }
 
-    pub fn fromString(bytes: []const u8) !LockResponse {
-        const status = switch (try std.fmt.parseInt(u8, bytes, 10)) {
-            0 => LockResponseStatus.Ok,
-            1 => LockResponseStatus.Busy,
-            2 => LockResponseStatus.Timeout,
-            else => return error.InvalidResponseStatus,
-        };
-        return LockResponse{
-            .status = status,
-        };
+    pub fn fromJson(
+        bytes: []const u8,
+        allocator: std.mem.Allocator,
+    ) !std.json.Parsed(LockResponse) {
+        const parsed = try std.json.parseFromSlice(
+            LockResponse,
+            allocator,
+            bytes,
+            .{},
+        );
+        return parsed;
     }
 };
+
+test "LockResponse.toJson serializes LockResponse correctly" {
+    const allocator = std.testing.allocator;
+    const response = LockResponse{
+        .status = LockResponseStatus.Ok,
+    };
+    const expected = "{\"status\":\"Ok\"}";
+
+    const json = try response.toJson(allocator);
+    defer allocator.free(json);
+
+    try std.testing.expectEqualStrings(expected, json);
+}
+
+test "LockResponse.fromJson deserializes JSON into LockResponse correctly" {
+    const allocator = std.testing.allocator;
+    const json = "{\"status\":\"Ok\"}";
+    const expected = LockResponse{
+        .status = LockResponseStatus.Ok,
+    };
+
+    const parsed = try LockResponse.fromJson(json, allocator);
+    defer parsed.deinit();
+    const response = parsed.value;
+
+    try std.testing.expectEqual(response.status, expected.status);
+}
+
+test "LockResponse.fromJson(LockResponse.toJson()) round-trip works correctly" {
+    const allocator = std.testing.allocator;
+    const original = LockResponse{
+        .status = LockResponseStatus.Ok,
+    };
+
+    const json = try original.toJson(allocator);
+    defer allocator.free(json);
+
+    const parsed = try LockResponse.fromJson(json, allocator);
+    defer parsed.deinit();
+    const response = parsed.value;
+
+    try std.testing.expectEqual(response.status, original.status);
+}
 
 pub fn writeLine(writer: *Io.Writer, message: []const u8) Io.Writer.Error!void {
     try writer.writeAll(message);
