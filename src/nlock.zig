@@ -89,24 +89,22 @@ pub fn runList(init: std.process.Init) !void {
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
 
-    const list_message = nlock.LockRequest
+    const allocator = init.gpa;
+    const list_message = try nlock.LockRequest
         .init(nlock.LockRequestType.ListLocks, "", false, "")
-        .toString();
+        .toJson(allocator);
+    defer allocator.free(list_message);
 
     try nlock.writeLine(&writer.interface, list_message);
 
     while (true) {
         const response_message = (try reader.interface.takeDelimiter('\n')) orelse break;
+        std.log.debug("Received lock response: {s}\n", .{response_message});
 
-        const lock_request = nlock.LockRequest.fromString(response_message) catch |err| {
-            std.debug.print("Failed to parse response: {s}\n", .{@errorName(err)});
-            return err;
-        };
+        const parsed_lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
+        defer parsed_lock_request.deinit();
+        const lock_request = parsed_lock_request.value;
 
-        nlock.printAnotherMessage(&writer.interface) catch |err| {
-            std.debug.print("Failed to print another message: {s}\n", .{@errorName(err)});
-            return err;
-        };
         std.log.info("Lock Name: {s}, Global: {}, Command: {s}", .{
             lock_request.name,
             lock_request.global,
@@ -126,18 +124,18 @@ pub fn acquireLock(
         return error.InvalidArguments;
     };
     defer allocator.free(command_str);
-    const message = nlock.LockRequest
+    const message = try nlock.LockRequest
         .init(nlock.LockRequestType.AcquireLock, options.name, options.global, command_str)
-        .toString();
+        .toJson(allocator);
+    defer allocator.free(message);
 
     try nlock.writeLine(writer, message);
 
     const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-
-    const lock_response = nlock.LockResponse.fromString(response_message) catch |err| {
-        std.debug.print("Failed to parse response: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    std.log.debug("Received lock response: {s}\n", .{response_message});
+    const parsed_lock_response = try nlock.LockResponse.fromJson(response_message, allocator);
+    defer parsed_lock_response.deinit();
+    const lock_response = parsed_lock_response.value;
 
     return lock_response.status;
 }
@@ -153,18 +151,19 @@ pub fn releaseLock(
         return error.InvalidArguments;
     };
     defer allocator.free(command_str);
-    const release_message = nlock.LockRequest
+    const release_message = try nlock.LockRequest
         .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, command_str)
-        .toString();
+        .toJson(allocator);
+    defer allocator.free(release_message);
 
     try nlock.writeLine(writer, release_message);
 
     const release_response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
+    std.log.debug("Received release lock response: {s}\n", .{release_response_message});
 
-    const release_response = nlock.LockResponse.fromString(release_response_message) catch |err| {
-        std.debug.print("Failed to parse release response: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    const parsed_release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
+    defer parsed_release_response.deinit();
+    const release_response = parsed_release_response.value;
 
     return release_response.status;
 }

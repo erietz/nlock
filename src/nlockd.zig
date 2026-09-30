@@ -93,7 +93,10 @@ fn handleConnection(
     // example.
 
     // Read the acquire request message from the client
-    const req = try readRequest(&reader.interface);
+    // const req = try readRequest(&reader.interface);
+    const parsed_req = try readRequest(&reader.interface, allocator);
+    defer parsed_req.deinit();
+    const req = parsed_req.value;
     switch (req.request_type) {
         nlock.LockRequestType.AcquireLock => {
             handleAcquireLockRequest(
@@ -109,7 +112,7 @@ fn handleConnection(
         },
         nlock.LockRequestType.ListLocks => {
             std.log.debug("Received list locks request", .{});
-            handleListLocksRequest(map, &writer.interface) catch |err| {
+            handleListLocksRequest(allocator, map, &writer.interface) catch |err| {
                 std.log.debug("Failed to handle list locks request: {s}", .{@errorName(err)});
                 return err;
             };
@@ -123,7 +126,9 @@ fn handleConnection(
 
     // The client executes the command and then sends a release lock request
     std.log.debug("Waiting for release lock request from client\n", .{});
-    const release_req = try readRequest(&reader.interface);
+    const parsed_release_req = try readRequest(&reader.interface, allocator);
+    defer parsed_release_req.deinit();
+    const release_req = parsed_release_req.value;
     switch (release_req.request_type) {
         nlock.LockRequestType.ReleaseLock => {
             handleReleaseLockRequest(
@@ -144,23 +149,32 @@ fn handleConnection(
     }
 }
 
-fn readRequest(reader: *Io.Reader) !nlock.LockRequest {
+fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !std.json.Parsed(nlock.LockRequest) {
     const message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    return nlock.LockRequest.fromString(message) catch |err| {
-        std.log.debug("Failed to parse message: {s}", .{@errorName(err)});
-        return err;
-    };
+    std.log.debug("Received lock request: {s}\n", .{message});
+    const parsed_request = try nlock.LockRequest.fromJson(message, allocator);
+    return parsed_request;
 }
 
 test "readRequest parses a valid LockRequest where command contains newlines" {
-    const message = "0:my_lock:false:echo 'Hello, World!'\necho 'This is a test.'\n";
+    const message = "{\"request_type\":\"AcquireLock\",\"name\":\"my_lock\",\"global\":false,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}\n";
+    const allocator = std.testing.allocator;
+    const expected_request = nlock.LockRequest.init(
+        nlock.LockRequestType.AcquireLock,
+        "my_lock",
+        false,
+        "echo 'Hello, World!'\necho 'This is a test.'\n",
+    );
 
     var reader = std.Io.Reader.fixed(message);
-    const request = try readRequest(&reader);
-    try std.testing.expectEqual(nlock.LockRequestType.AcquireLock, request.request_type);
-    try std.testing.expectEqual("my_lock", request.name);
-    try std.testing.expectEqual(false, request.global);
-    try std.testing.expectEqual("echo 'Hello, World!'\necho 'This is a test.'\n", request.command);
+    const parsed_request = try readRequest(&reader, allocator);
+    defer parsed_request.deinit();
+    const request = parsed_request.value;
+
+    try std.testing.expectEqual(expected_request.request_type, request.request_type);
+    try std.testing.expectEqualStrings(expected_request.name, request.name);
+    try std.testing.expectEqual(expected_request.global, request.global);
+    try std.testing.expectEqualStrings(expected_request.command, request.command);
 }
 
 fn handleAcquireLockRequest(
@@ -222,7 +236,8 @@ fn handleAcquireLockRequest(
     }
 
     std.log.info("Sending acquired response for lock {s}.", .{lock_name_copy});
-    const acquired_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
+    const acquired_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toJson(allocator);
+    defer allocator.free(acquired_response);
     try nlock.writeLine(writer, acquired_response);
 }
 
@@ -251,7 +266,8 @@ fn handleReleaseLockRequest(
         }
 
         std.log.info("Lock for name '{s}' released successfully.", .{lock_request.name});
-        const lock_response = nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toString();
+        const lock_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toJson(allocator);
+        defer allocator.free(lock_response);
         try nlock.writeLine(writer, lock_response);
     } else {
         std.log.err("No lock found for name '{s}' to release.", .{lock_request.name});
@@ -260,6 +276,7 @@ fn handleReleaseLockRequest(
 }
 
 fn handleListLocksRequest(
+    allocator: std.mem.Allocator,
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
 ) !void {
@@ -268,12 +285,13 @@ fn handleListLocksRequest(
         const lock_name = entry.key_ptr.*;
         const lock_command = entry.value_ptr.*.command;
 
-        const lock_info = nlock.LockRequest.init(
+        const lock_info = try nlock.LockRequest.init(
             nlock.LockRequestType.AcquireLock,
             lock_name,
             false,
             lock_command,
-        ).toString();
+        ).toJson(allocator);
+        defer allocator.free(lock_info);
 
         try nlock.writeLine(writer, lock_info);
     }
