@@ -33,6 +33,8 @@ pub const LockRequest = struct {
         };
     }
 
+    /// Serializes the LockRequest to a JSON string.
+    /// Allocates memory for the JSON string, which must be freed by the caller.
     pub fn toJson(
         self: LockRequest,
         allocator: std.mem.Allocator,
@@ -45,6 +47,10 @@ pub const LockRequest = struct {
         return json;
     }
 
+    // TODO: Consider returning a LockRequest struct directly instead of a
+    // Parsed(LockRequest) to simplify usage. Would require allocator.dupe of
+    // the name and command fields but then the caller would have to free
+    // those. Add a deinit method to LockRequest to free those fields?
     pub fn fromJson(
         bytes: []const u8,
         allocator: std.mem.Allocator,
@@ -164,17 +170,21 @@ pub const LockResponse = struct {
         return json;
     }
 
+    /// Deserializes a JSON string into a LockResponse.
+    /// Allocates memory for the LockResponse, which must be freed by the caller.
     pub fn fromJson(
         bytes: []const u8,
         allocator: std.mem.Allocator,
-    ) !std.json.Parsed(LockResponse) {
+    ) !LockResponse {
         const parsed = try std.json.parseFromSlice(
             LockResponse,
             allocator,
             bytes,
             .{},
         );
-        return parsed;
+        defer parsed.deinit();
+
+        return .init(parsed.value.status);
     }
 };
 
@@ -198,9 +208,7 @@ test "LockResponse.fromJson deserializes JSON into LockResponse correctly" {
         .status = LockResponseStatus.Ok,
     };
 
-    const parsed = try LockResponse.fromJson(json, allocator);
-    defer parsed.deinit();
-    const response = parsed.value;
+    const response = try LockResponse.fromJson(json, allocator);
 
     try std.testing.expectEqual(response.status, expected.status);
 }
@@ -214,9 +222,7 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trip works correctly" {
     const json = try original.toJson(allocator);
     defer allocator.free(json);
 
-    const parsed = try LockResponse.fromJson(json, allocator);
-    defer parsed.deinit();
-    const response = parsed.value;
+    const response = try LockResponse.fromJson(json, allocator);
 
     try std.testing.expectEqual(response.status, original.status);
 }

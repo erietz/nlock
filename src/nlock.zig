@@ -133,10 +133,7 @@ pub fn acquireLock(
 
     const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
     std.log.debug("Received lock response: {s}\n", .{response_message});
-    const parsed_lock_response = try nlock.LockResponse.fromJson(response_message, allocator);
-    defer parsed_lock_response.deinit();
-    const lock_response = parsed_lock_response.value;
-
+    const lock_response = try nlock.LockResponse.fromJson(response_message, allocator);
     return lock_response.status;
 }
 
@@ -161,10 +158,7 @@ pub fn releaseLock(
     const release_response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
     std.log.debug("Received release lock response: {s}\n", .{release_response_message});
 
-    const parsed_release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
-    defer parsed_release_response.deinit();
-    const release_response = parsed_release_response.value;
-
+    const release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
     return release_response.status;
 }
 

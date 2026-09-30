@@ -236,7 +236,10 @@ fn handleAcquireLockRequest(
     }
 
     std.log.info("Sending acquired response for lock {s}.", .{lock_name_copy});
-    const acquired_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toJson(allocator);
+    const acquired_response = try nlock.LockResponse
+        .init(
+            nlock.LockResponseStatus.Ok,
+        ).toJson(allocator);
     defer allocator.free(acquired_response);
     try nlock.writeLine(writer, acquired_response);
 }

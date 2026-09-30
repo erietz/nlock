@@ -1,6 +1,5 @@
 const std = @import("std");
 const Io = std.Io;
-const options = @import("options.zig");
 const cli = @import("cli.zig");
 const protocol = @import("protocol.zig");
 const hash = @import("hash.zig");
@@ -14,8 +13,8 @@ pub const SOCKET_PATH_ENV = "NLOCK_SOCKET";
 pub fn socketPath(environ_map: *const std.process.Environ.Map) []const u8 {
     return environ_map.get(SOCKET_PATH_ENV) orelse SOCKET_PATH;
 }
-pub const Command = options.Command;
-pub const RunOptions = options.RunOptions;
+pub const Command = cli.Command;
+pub const RunOptions = cli.RunOptions;
 pub const usage = cli.usage;
 pub const LockResponseStatus = protocol.LockResponseStatus;
 pub const LockRequestType = protocol.LockRequestType;
@@ -27,7 +26,6 @@ pub const Lock = queue.Lock;
 pub const Waiter = queue.Waiter;
 
 test {
-    _ = options;
     _ = cli;
     _ = protocol;
     _ = hash;
