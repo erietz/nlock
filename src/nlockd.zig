@@ -152,6 +152,17 @@ fn readRequest(reader: *Io.Reader) !nlock.LockRequest {
     };
 }
 
+test "readRequest parses a valid LockRequest where command contains newlines" {
+    const message = "0:my_lock:false:echo 'Hello, World!'\necho 'This is a test.'\n";
+
+    var reader = std.Io.Reader.fixed(message);
+    const request = try readRequest(&reader);
+    try std.testing.expectEqual(nlock.LockRequestType.AcquireLock, request.request_type);
+    try std.testing.expectEqual("my_lock", request.name);
+    try std.testing.expectEqual(false, request.global);
+    try std.testing.expectEqual("echo 'Hello, World!'\necho 'This is a test.'\n", request.command);
+}
+
 fn handleAcquireLockRequest(
     io: Io,
     allocator: std.mem.Allocator,
