@@ -154,12 +154,18 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    const daemon_tests = b.addTest(.{
+        .root_module = nlockd_exe.root_module,
+    });
+    const run_daemon_tests = b.addRunArtifact(daemon_tests);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_daemon_tests.step);
 
     // Integration tests spawn the real nlockd/nlock binaries as child
     // processes. `addOptionPath` passes their paths to the test via the

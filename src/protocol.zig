@@ -127,6 +127,24 @@ test "bytesToLockRequest deserializes bytes into LockRequest with ReleaseLock co
     try std.testing.expectEqualStrings("echo Hello", request.command);
 }
 
+test "bytesToLockRequest correctly handles colon in command" {
+    const bytes = "0:mylock:true:echo Hello:World";
+    const request = try LockRequest.fromString(bytes);
+    try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(request.request_type));
+    try std.testing.expectEqualStrings("mylock", request.name);
+    try std.testing.expectEqual(true, request.global);
+    try std.testing.expectEqualStrings("echo Hello:World", request.command);
+}
+
+test "bytesToLockRequest correctly handles newline in command" {
+    const bytes = "0:mylock:true:echo Hello\nWorld";
+    const request = try LockRequest.fromString(bytes);
+    try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(request.request_type));
+    try std.testing.expectEqualStrings("mylock", request.name);
+    try std.testing.expectEqual(true, request.global);
+    try std.testing.expectEqualStrings("echo Hello\nWorld", request.command);
+}
+
 pub const LockResponse = struct {
     status: LockResponseStatus,
 
