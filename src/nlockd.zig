@@ -21,11 +21,11 @@ pub fn runServer(init: std.process.Init) !void {
     const socket_path = nlock.getSocketPath(init.environ_map);
     nlock.log.init(nlock.log.getLogLevel(init.environ_map));
 
-    std.Io.Dir.deleteFileAbsolute(io, socket_path) catch |err| switch (err) {
+    std.Io.Dir.cwd().deleteFile(io, socket_path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
+    defer std.Io.Dir.cwd().deleteFile(io, socket_path) catch {};
 
     const address = try std.Io.net.UnixAddress.init(socket_path);
     var server = try address.listen(io, .{});
