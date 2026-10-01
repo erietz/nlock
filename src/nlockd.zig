@@ -4,8 +4,11 @@ const nlock = @import("nlock");
 const log = nlock.log.log;
 const ll = nlock.log.LogLevel;
 
-pub fn main(init: std.process.Init) !void {
-    try run(init);
+pub fn main(init: std.process.Init) void {
+    run(init) catch |err| {
+        log(ll.Error, "Error: {s}", .{@errorName(err)});
+        std.process.exit(1);
+    };
 }
 
 pub fn run(init: std.process.Init) !void {
@@ -18,27 +21,26 @@ pub fn runServer(init: std.process.Init) !void {
     const socket_path = nlock.getSocketPath(init.environ_map);
     nlock.log.init(nlock.log.getLogLevel(init.environ_map));
 
-    std.Io.Dir.cwd().deleteFile(io, socket_path) catch |err| switch (err) {
+    std.Io.Dir.deleteFileAbsolute(io, socket_path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
     };
-    defer std.Io.Dir.cwd().deleteFile(io, socket_path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io, socket_path) catch {};
 
     const address = try std.Io.net.UnixAddress.init(socket_path);
-
     var server = try address.listen(io, .{});
     defer server.deinit(io);
     log(ll.Info, "Server started and listening on {s}", .{socket_path});
 
-    const allocator = init.gpa;
-    var map = nlock.ThreadSafeHashMap([]const u8, nlock.Lock).init(io, allocator);
+    const gpa = init.gpa;
+    var map = nlock.ThreadSafeHashMap([]const u8, nlock.Lock).init(io, gpa);
     // Declared before `group` so this runs after `group.cancel`: no connection
     // tasks remain, so it is safe to walk the inner map without the mutex.
     defer {
         var it = map.map.iterator();
         while (it.next()) |entry| {
-            allocator.free(entry.key_ptr.*);
-            allocator.free(entry.value_ptr.*.command);
+            gpa.free(entry.key_ptr.*);
+            gpa.free(entry.value_ptr.*.command);
         }
         map.deinit();
     }
@@ -48,10 +50,11 @@ pub fn runServer(init: std.process.Init) !void {
     defer group.cancel(io);
 
     while (true) {
-        var stream = try server.accept(io);
+        const stream = try server.accept(io);
+        // Spawn a new task to handle the connection
         group.concurrent(io, connectionTask, .{
             io,
-            allocator,
+            gpa,
             stream,
             &map,
         }) catch |err| {
@@ -97,9 +100,8 @@ fn handleConnection(
 
     // Read the acquire request message from the client
     // const req = try readRequest(&reader.interface);
-    const parsed_req = try readRequest(&reader.interface, allocator);
-    defer parsed_req.deinit();
-    const req = parsed_req.value;
+    var req = try readRequest(&reader.interface, allocator);
+    defer req.deinit(allocator);
     switch (req.request_type) {
         nlock.LockRequestType.AcquireLock => {
             handleAcquireLockRequest(
@@ -109,29 +111,26 @@ fn handleConnection(
                 map,
                 &writer.interface,
             ) catch |err| {
-                log(ll.Debug, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
+                log(ll.Error, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
                 return err;
             };
         },
         nlock.LockRequestType.ListLocks => {
-            log(ll.Debug, "Received list locks request", .{});
-            handleListLocksRequest(allocator, map, &writer.interface) catch |err| {
-                log(ll.Debug, "Failed to handle list locks request: {s}", .{@errorName(err)});
+            return handleListLocksRequest(allocator, map, &writer.interface) catch |err| {
+                log(ll.Error, "Failed to handle list locks request: {s}", .{@errorName(err)});
                 return err;
             };
-            return;
         },
         else => {
-            log(ll.Debug, "Received unexpected request type: {d}", .{req.request_type});
+            log(ll.Error, "Received unexpected request type: {d}", .{req.request_type});
             return error.UnexpectedRequestType;
         },
     }
 
     // The client executes the command and then sends a release lock request
     log(ll.Debug, "Waiting for release lock request from client", .{});
-    const parsed_release_req = try readRequest(&reader.interface, allocator);
-    defer parsed_release_req.deinit();
-    const release_req = parsed_release_req.value;
+    var release_req = try readRequest(&reader.interface, allocator);
+    defer release_req.deinit(allocator);
     switch (release_req.request_type) {
         nlock.LockRequestType.ReleaseLock => {
             handleReleaseLockRequest(
@@ -152,11 +151,10 @@ fn handleConnection(
     }
 }
 
-fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !std.json.Parsed(nlock.LockRequest) {
+fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !nlock.LockRequest {
     const message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
     log(ll.Debug, "Received lock request: {s}", .{message});
-    const parsed_request = try nlock.LockRequest.fromJson(message, allocator);
-    return parsed_request;
+    return nlock.LockRequest.fromJson(message, allocator);
 }
 
 test "readRequest parses a valid LockRequest where command contains newlines" {
@@ -170,9 +168,8 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     );
 
     var reader = std.Io.Reader.fixed(message);
-    const parsed_request = try readRequest(&reader, allocator);
-    defer parsed_request.deinit();
-    const request = parsed_request.value;
+    var request = try readRequest(&reader, allocator);
+    defer request.deinit(allocator);
 
     try std.testing.expectEqual(expected_request.request_type, request.request_type);
     try std.testing.expectEqualStrings(expected_request.name, request.name);
@@ -275,10 +272,11 @@ fn handleReleaseLockRequest(
         const lock_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toJson(allocator);
         defer allocator.free(lock_response);
         try nlock.writeLine(writer, lock_response);
-    } else {
-        log(ll.Error, "No lock found for name '{s}' to release.", .{lock_request.name});
-        return error.LockNotFound;
+        return;
     }
+
+    log(ll.Error, "No lock found for name '{s}' to release.", .{lock_request.name});
+    return error.LockNotFound;
 }
 
 fn handleListLocksRequest(

@@ -33,6 +33,11 @@ pub const LockRequest = struct {
         };
     }
 
+    pub fn deinit(self: *LockRequest, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.command);
+    }
+
     /// Serializes the LockRequest to a JSON string.
     /// Allocates memory for the JSON string, which must be freed by the caller.
     pub fn toJson(
@@ -47,21 +52,29 @@ pub const LockRequest = struct {
         return json;
     }
 
-    // TODO: Consider returning a LockRequest struct directly instead of a
-    // Parsed(LockRequest) to simplify usage. Would require allocator.dupe of
-    // the name and command fields but then the caller would have to free
-    // those. Add a deinit method to LockRequest to free those fields?
+    /// Deserializes a JSON string into a LockRequest.
+    /// Allocates memory for the LockRequest, which must be freed by the caller.
     pub fn fromJson(
         bytes: []const u8,
         allocator: std.mem.Allocator,
-    ) !std.json.Parsed(LockRequest) {
+    ) !LockRequest {
         const parsed = try std.json.parseFromSlice(
             LockRequest,
             allocator,
             bytes,
             .{},
         );
-        return parsed;
+        const lock_request = parsed.value;
+
+        return .init(
+            lock_request.request_type,
+            allocator.dupe(u8, lock_request.name) catch return error.OutOfMemory,
+            lock_request.global,
+            allocator.dupe(u8, lock_request.command) catch {
+                allocator.free(lock_request.name);
+                return error.OutOfMemory;
+            },
+        );
     }
 };
 
@@ -91,9 +104,8 @@ test "LockRequest.fromJson deserializes JSON into LockRequest correctly" {
         .command = "echo Hello",
     };
 
-    const parsed = try LockRequest.fromJson(json, allocator);
-    defer parsed.deinit();
-    const request = parsed.value;
+    var request = try LockRequest.fromJson(json, allocator);
+    defer request.deinit(allocator);
 
     try std.testing.expectEqual(request.request_type, expected.request_type);
     try std.testing.expectEqualStrings(request.name, expected.name);
@@ -113,9 +125,8 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
     const json = try original.toJson(allocator);
     defer allocator.free(json);
 
-    const parsed = try LockRequest.fromJson(json, allocator);
-    defer parsed.deinit();
-    const request = parsed.value;
+    var request = try LockRequest.fromJson(json, allocator);
+    defer request.deinit(allocator);
 
     try std.testing.expectEqual(request.request_type, original.request_type);
     try std.testing.expectEqualStrings(request.name, original.name);
@@ -126,9 +137,8 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
 test "LockRequest.fromJson correctly handles colon in command" {
     const allocator = std.testing.allocator;
     const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"command\":\"echo Hello:World\"}";
-    const request = try LockRequest.fromJson(json, allocator);
-    defer request.deinit();
-    const lock_request = request.value;
+    var lock_request = try LockRequest.fromJson(json, allocator);
+    defer lock_request.deinit(allocator);
 
     try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(lock_request.request_type));
     try std.testing.expectEqualStrings("mylock", lock_request.name);
@@ -139,9 +149,7 @@ test "LockRequest.fromJson correctly handles colon in command" {
 test "LockRequest.fromJson correctly handles newline in command" {
     const allocator = std.testing.allocator;
     const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"command\":\"echo Hello\\nWorld\"}";
-    const request = try LockRequest.fromJson(json, allocator);
-    defer request.deinit();
-    const lock_request = request.value;
+    const lock_request = try LockRequest.fromJson(json, allocator);
 
     try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(lock_request.request_type));
     try std.testing.expectEqualStrings("mylock", lock_request.name);

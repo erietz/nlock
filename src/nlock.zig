@@ -110,9 +110,8 @@ pub fn runList(init: std.process.Init) !void {
         const response_message = (try reader.interface.takeDelimiter('\n')) orelse break;
         log(ll.Debug, "Received lock response: {s}", .{response_message});
 
-        const parsed_lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
-        defer parsed_lock_request.deinit();
-        const lock_request = parsed_lock_request.value;
+        var lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
+        defer lock_request.deinit(allocator);
 
         // TODO: this should be stdout output not log to stderr
         log(ll.Warn, "Lock Name: {s}, Global: {}, Command: {s}", .{
