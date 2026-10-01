@@ -27,11 +27,11 @@ pub fn main(init: std.process.Init) void {
 }
 
 pub fn run(init: std.process.Init) !void {
-    const log_level_str = init.environ_map.get(nlock.log.ENV_NLOCK_LOG_LEVEL);
-    const log_level = std.meta.stringToEnum(
-        nlock.log.LogLevel,
-        log_level_str orelse @tagName(ll.None),
-    ) orelse ll.None;
+    const log_level_str = init.environ_map.get(nlock.log.ENV_NLOCK_LOG_LEVEL) orelse @tagName(ll.None);
+    const log_level = std.meta.stringToEnum(nlock.log.LogLevel, log_level_str) orelse blk: {
+        log(ll.Warn, "Invalid log level: {s}. Defaulting to None.", .{log_level_str});
+        break :blk ll.None;
+    };
     nlock.log.init(log_level);
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -42,7 +42,7 @@ pub fn run(init: std.process.Init) !void {
 }
 
 pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
-    const address = try std.Io.net.UnixAddress.init(nlock.socketPath(init.environ_map));
+    const address = try std.Io.net.UnixAddress.init(nlock.getSocketPath(init.environ_map));
     const stream = try address.connect(init.io);
     defer stream.close(init.io);
 
@@ -60,14 +60,14 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
     );
 
     if (acquireStatus == nlock.LockResponseStatus.Ok) {
-        log(ll.Debug, "Lock acquired successfully. Running command\n", .{});
+        log(ll.Debug, "Lock acquired successfully. Running command", .{});
         runCommand(init.io, options.command) catch |err| {
             // Even if the command fails, we should still attempt to release
             // the lock so no return error here, just log the error
             std.debug.print("Failed to run command: {s}\n", .{@errorName(err)});
         };
 
-        log(ll.Debug, "Command finished. Releasing lock: {s}\n", .{options.name});
+        log(ll.Debug, "Command finished. Releasing lock: {s}", .{options.name});
         const releaseStatus = try releaseLock(
             init.arena.allocator(),
             &writer.interface,
@@ -88,7 +88,7 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
 }
 
 pub fn runList(init: std.process.Init) !void {
-    const address = try std.Io.net.UnixAddress.init(nlock.socketPath(init.environ_map));
+    const address = try std.Io.net.UnixAddress.init(nlock.getSocketPath(init.environ_map));
     const stream = try address.connect(init.io);
     defer stream.close(init.io);
 
@@ -108,7 +108,7 @@ pub fn runList(init: std.process.Init) !void {
 
     while (true) {
         const response_message = (try reader.interface.takeDelimiter('\n')) orelse break;
-        log(ll.Debug, "Received lock response: {s}\n", .{response_message});
+        log(ll.Debug, "Received lock response: {s}", .{response_message});
 
         const parsed_lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
         defer parsed_lock_request.deinit();
@@ -142,7 +142,7 @@ pub fn acquireLock(
     try nlock.writeLine(writer, message);
 
     const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    log(ll.Debug, "Received lock response: {s}\n", .{response_message});
+    log(ll.Debug, "Received lock response: {s}", .{response_message});
     const lock_response = try nlock.LockResponse.fromJson(response_message, allocator);
     return lock_response.status;
 }
@@ -166,7 +166,7 @@ pub fn releaseLock(
     try nlock.writeLine(writer, release_message);
 
     const release_response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    log(ll.Debug, "Received release lock response: {s}\n", .{release_response_message});
+    log(ll.Debug, "Received release lock response: {s}", .{release_response_message});
 
     const release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
     return release_response.status;
@@ -189,16 +189,16 @@ pub fn runCommand(io: Io, command: []const []const u8) !void {
 
     switch (term) {
         .exited => {
-            log(ll.Debug, "Process exited with code: {d}\n", .{term.exited});
+            log(ll.Debug, "Process exited with code: {d}", .{term.exited});
         },
         .signal => {
-            log(ll.Debug, "Process terminated by signal: {d}\n", .{term.signal});
+            log(ll.Debug, "Process terminated by signal: {d}", .{term.signal});
         },
         .stopped => {
-            log(ll.Debug, "Process stopped by signal: {d}\n", .{term.signal});
+            log(ll.Debug, "Process stopped by signal: {d}", .{term.signal});
         },
         .unknown => {
-            log(ll.Debug, "Process terminated with unknown status.\n", .{});
+            log(ll.Debug, "Process terminated with unknown status.", .{});
         },
     }
 }

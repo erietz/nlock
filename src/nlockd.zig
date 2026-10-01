@@ -1,6 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
+const log = nlock.log.log;
+const ll = nlock.log.LogLevel;
 
 pub fn main(init: std.process.Init) !void {
     try run(init);
@@ -13,7 +15,8 @@ pub fn run(init: std.process.Init) !void {
 
 pub fn runServer(init: std.process.Init) !void {
     const io = init.io;
-    const socket_path = nlock.socketPath(init.environ_map);
+    const socket_path = nlock.getSocketPath(init.environ_map);
+    nlock.log.init(nlock.log.getLogLevel(init.environ_map));
 
     std.Io.Dir.cwd().deleteFile(io, socket_path) catch |err| switch (err) {
         error.FileNotFound => {},
@@ -25,7 +28,7 @@ pub fn runServer(init: std.process.Init) !void {
 
     var server = try address.listen(io, .{});
     defer server.deinit(io);
-    std.log.info("Server started and listening on {s}", .{socket_path});
+    log(ll.Info, "Server started and listening on {s}", .{socket_path});
 
     const allocator = init.gpa;
     var map = nlock.ThreadSafeHashMap([]const u8, nlock.Lock).init(io, allocator);
@@ -52,7 +55,7 @@ pub fn runServer(init: std.process.Init) !void {
             stream,
             &map,
         }) catch |err| {
-            std.log.err("Failed to spawn connection task: {s}", .{@errorName(err)});
+            log(ll.Error, "Failed to spawn connection task: {s}", .{@errorName(err)});
             stream.close(io);
         };
     }
@@ -72,7 +75,7 @@ fn connectionTask(
         stream,
         map,
     ) catch |err| {
-        std.log.debug("Connection error: {s}", .{@errorName(err)});
+        log(ll.Debug, "Connection error: {s}", .{@errorName(err)});
     };
 }
 
@@ -106,26 +109,26 @@ fn handleConnection(
                 map,
                 &writer.interface,
             ) catch |err| {
-                std.log.debug("Failed to handle acquire lock request: {s}", .{@errorName(err)});
+                log(ll.Debug, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
                 return err;
             };
         },
         nlock.LockRequestType.ListLocks => {
-            std.log.debug("Received list locks request", .{});
+            log(ll.Debug, "Received list locks request", .{});
             handleListLocksRequest(allocator, map, &writer.interface) catch |err| {
-                std.log.debug("Failed to handle list locks request: {s}", .{@errorName(err)});
+                log(ll.Debug, "Failed to handle list locks request: {s}", .{@errorName(err)});
                 return err;
             };
             return;
         },
         else => {
-            std.log.debug("Received unexpected request type: {d}", .{req.request_type});
+            log(ll.Debug, "Received unexpected request type: {d}", .{req.request_type});
             return error.UnexpectedRequestType;
         },
     }
 
     // The client executes the command and then sends a release lock request
-    std.log.debug("Waiting for release lock request from client\n", .{});
+    log(ll.Debug, "Waiting for release lock request from client", .{});
     const parsed_release_req = try readRequest(&reader.interface, allocator);
     defer parsed_release_req.deinit();
     const release_req = parsed_release_req.value;
@@ -138,12 +141,12 @@ fn handleConnection(
                 map,
                 &writer.interface,
             ) catch |err| {
-                std.log.debug("Failed to handle release lock request: {s}", .{@errorName(err)});
+                log(ll.Debug, "Failed to handle release lock request: {s}", .{@errorName(err)});
                 return err;
             };
         },
         else => {
-            std.log.debug("Received unexpected request type: {d}", .{release_req.request_type});
+            log(ll.Debug, "Received unexpected request type: {d}", .{release_req.request_type});
             return error.UnexpectedRequestType;
         },
     }
@@ -151,7 +154,7 @@ fn handleConnection(
 
 fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !std.json.Parsed(nlock.LockRequest) {
     const message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    std.log.debug("Received lock request: {s}\n", .{message});
+    log(ll.Debug, "Received lock request: {s}", .{message});
     const parsed_request = try nlock.LockRequest.fromJson(message, allocator);
     return parsed_request;
 }
@@ -208,18 +211,18 @@ fn handleAcquireLockRequest(
     };
 
     if (acquired) {
-        std.log.info("Acquired lock for name '{s}' (global: {}). Command: {s}", .{
+        log(ll.Info, "Acquired lock for name '{s}' (global: {}). Command: {s}", .{
             lock_request.name,
             lock_request.global,
             lock_request.command,
         });
     } else {
-        std.log.info("Lock for name '{s}' is already acquired", .{lock_name_copy});
+        log(ll.Info, "Lock for name '{s}' is already acquired", .{lock_name_copy});
         // TODO: almost feel like we need manual control of the mutex from
         // above, so that we can do a get and then a put in the same section.
         // There is still a race condition here.
         var existing_lock = map.getPtr(lock_name_copy) orelse {
-            std.log.err("Lock for name '{s}' was removed before we could add a waiter", .{lock_name_copy});
+            log(ll.Error, "Lock for name '{s}' was removed before we could add a waiter", .{lock_name_copy});
             return error.LockAlreadyAcquired;
         };
         var waiter = nlock.Waiter{
@@ -231,11 +234,11 @@ fn handleAcquireLockRequest(
         existing_lock.waiters.append(&waiter.node);
         // Wait for the lock to be released. This does not happen until the
         // client sends a release lock request, which will signal this waiter.
-        std.log.debug("Waiting for lock '{s}' to be released\n", .{lock_name_copy});
+        log(ll.Debug, "Waiting for lock '{s}' to be released", .{lock_name_copy});
         try waiter.event.wait(io);
     }
 
-    std.log.info("Sending acquired response for lock {s}.", .{lock_name_copy});
+    log(ll.Info, "Sending acquired response for lock {s}.", .{lock_name_copy});
     const acquired_response = try nlock.LockResponse
         .init(
             nlock.LockResponseStatus.Ok,
@@ -251,7 +254,7 @@ fn handleReleaseLockRequest(
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
 ) !void {
-    std.log.info("Releasing lock for name '{s}' (global: {})", .{
+    log(ll.Info, "Releasing lock for name '{s}' (global: {})", .{
         lock_request.name,
         lock_request.global,
     });
@@ -268,12 +271,12 @@ fn handleReleaseLockRequest(
             _ = map.remove(lock_request.name);
         }
 
-        std.log.info("Lock for name '{s}' released successfully.", .{lock_request.name});
+        log(ll.Info, "Lock for name '{s}' released successfully.", .{lock_request.name});
         const lock_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toJson(allocator);
         defer allocator.free(lock_response);
         try nlock.writeLine(writer, lock_response);
     } else {
-        std.log.err("No lock found for name '{s}' to release.", .{lock_request.name});
+        log(ll.Error, "No lock found for name '{s}' to release.", .{lock_request.name});
         return error.LockNotFound;
     }
 }

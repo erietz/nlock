@@ -11,7 +11,7 @@ pub const ENV_SOCKET_PATH = "NLOCK_SOCKET";
 
 /// Returns the socket path from the `NLOCK_SOCKET` environment variable,
 /// falling back to `SOCKET_PATH`.
-pub fn socketPath(environ_map: *const std.process.Environ.Map) []const u8 {
+pub fn getSocketPath(environ_map: *const std.process.Environ.Map) []const u8 {
     return environ_map.get(ENV_SOCKET_PATH) orelse SOCKET_PATH;
 }
 pub const Command = cli.Command;

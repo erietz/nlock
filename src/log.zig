@@ -16,6 +16,12 @@ pub fn init(level: LogLevel) void {
     log_level = level;
 }
 
+pub fn getLogLevel(environ_map: *const std.process.Environ.Map) LogLevel {
+    const log_level_str = environ_map.get(ENV_NLOCK_LOG_LEVEL);
+    const level = std.meta.stringToEnum(LogLevel, log_level_str orelse "None") orelse LogLevel.None;
+    return level;
+}
+
 pub fn log(level: LogLevel, comptime message: []const u8, args: anytype) void {
     if (@intFromEnum(level) >= @intFromEnum(log_level)) {
         switch (level) {

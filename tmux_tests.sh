@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+tmux set-environment -g NLOCK_LOG_LEVEL "${NLOCK_LOG_LEVEL}"
+COMMAND="${COMMAND:-sleep 3}"
+
 zig build
 
 # open a new tmux window and split the window into two panes
@@ -23,12 +26,12 @@ tmux split-window -v -t 3
 sleep 2
 
 # Send a command to the right pane from the client
-tmux send-keys -t 2 "./zig-out/bin/nlock run test -- sleep 3" C-m
+tmux send-keys -t 2 "./zig-out/bin/nlock run test -- ${COMMAND}" C-m
 sleep 1
 
 # Send a command to the bottom right pane from the client
-tmux send-keys -t 3 "./zig-out/bin/nlock run test -- sleep 3" C-m
+tmux send-keys -t 3 "./zig-out/bin/nlock run test -- ${COMMAND}" C-m
 sleep 1
 
 # Send a command to the bottom right pane from the client
-tmux send-keys -t 4 "./zig-out/bin/nlock run test -- sleep 3" C-m
+tmux send-keys -t 4 "./zig-out/bin/nlock run test -- ${COMMAND}" C-m
