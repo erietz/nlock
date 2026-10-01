@@ -5,6 +5,8 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
+const log = nlock.log.log;
+const ll = nlock.log.LogLevel;
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
@@ -25,6 +27,13 @@ pub fn main(init: std.process.Init) void {
 }
 
 pub fn run(init: std.process.Init) !void {
+    const log_level_str = init.environ_map.get(nlock.log.ENV_NLOCK_LOG_LEVEL);
+    const log_level = std.meta.stringToEnum(
+        nlock.log.LogLevel,
+        log_level_str orelse @tagName(ll.None),
+    ) orelse ll.None;
+    nlock.log.init(log_level);
+
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     switch (try nlock.Command.parseArgs(args)) {
         .run => |options| try runLocked(init, options),
@@ -51,14 +60,14 @@ pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
     );
 
     if (acquireStatus == nlock.LockResponseStatus.Ok) {
-        std.log.debug("Lock acquired successfully. Running command\n", .{});
+        log(ll.Debug, "Lock acquired successfully. Running command\n", .{});
         runCommand(init.io, options.command) catch |err| {
             // Even if the command fails, we should still attempt to release
             // the lock so no return error here, just log the error
             std.debug.print("Failed to run command: {s}\n", .{@errorName(err)});
         };
 
-        std.log.debug("Command finished. Releasing lock: {s}\n", .{options.name});
+        log(ll.Debug, "Command finished. Releasing lock: {s}\n", .{options.name});
         const releaseStatus = try releaseLock(
             init.arena.allocator(),
             &writer.interface,
@@ -99,13 +108,14 @@ pub fn runList(init: std.process.Init) !void {
 
     while (true) {
         const response_message = (try reader.interface.takeDelimiter('\n')) orelse break;
-        std.log.debug("Received lock response: {s}\n", .{response_message});
+        log(ll.Debug, "Received lock response: {s}\n", .{response_message});
 
         const parsed_lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
         defer parsed_lock_request.deinit();
         const lock_request = parsed_lock_request.value;
 
-        std.log.info("Lock Name: {s}, Global: {}, Command: {s}", .{
+        // TODO: this should be stdout output not log to stderr
+        log(ll.Warn, "Lock Name: {s}, Global: {}, Command: {s}", .{
             lock_request.name,
             lock_request.global,
             lock_request.command,
@@ -120,7 +130,7 @@ pub fn acquireLock(
     options: nlock.RunOptions,
 ) !nlock.LockResponseStatus {
     const command_str = std.mem.join(allocator, " ", options.command) catch {
-        std.log.err("Failed to join command arguments", .{});
+        log(ll.Error, "Failed to join command arguments", .{});
         return error.InvalidArguments;
     };
     defer allocator.free(command_str);
@@ -132,7 +142,7 @@ pub fn acquireLock(
     try nlock.writeLine(writer, message);
 
     const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    std.log.debug("Received lock response: {s}\n", .{response_message});
+    log(ll.Debug, "Received lock response: {s}\n", .{response_message});
     const lock_response = try nlock.LockResponse.fromJson(response_message, allocator);
     return lock_response.status;
 }
@@ -144,7 +154,7 @@ pub fn releaseLock(
     options: nlock.RunOptions,
 ) !nlock.LockResponseStatus {
     const command_str = std.mem.join(allocator, " ", options.command) catch {
-        std.log.err("Failed to join command arguments", .{});
+        log(ll.Error, "Failed to join command arguments", .{});
         return error.InvalidArguments;
     };
     defer allocator.free(command_str);
@@ -156,7 +166,7 @@ pub fn releaseLock(
     try nlock.writeLine(writer, release_message);
 
     const release_response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    std.log.debug("Received release lock response: {s}\n", .{release_response_message});
+    log(ll.Debug, "Received release lock response: {s}\n", .{release_response_message});
 
     const release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
     return release_response.status;
@@ -179,16 +189,16 @@ pub fn runCommand(io: Io, command: []const []const u8) !void {
 
     switch (term) {
         .exited => {
-            std.debug.print("Process exited with code: {d}\n", .{term.exited});
+            log(ll.Debug, "Process exited with code: {d}\n", .{term.exited});
         },
         .signal => {
-            std.debug.print("Process terminated by signal: {d}\n", .{term.signal});
+            log(ll.Debug, "Process terminated by signal: {d}\n", .{term.signal});
         },
         .stopped => {
-            std.debug.print("Process stopped by signal: {d}\n", .{term.signal});
+            log(ll.Debug, "Process stopped by signal: {d}\n", .{term.signal});
         },
         .unknown => {
-            std.debug.print("Process terminated with unknown status.\n", .{});
+            log(ll.Debug, "Process terminated with unknown status.\n", .{});
         },
     }
 }

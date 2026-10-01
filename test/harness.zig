@@ -28,7 +28,7 @@ pub const Daemon = struct {
 
         self.environ = .init(gpa);
         errdefer self.environ.deinit();
-        try self.environ.put(nlock.SOCKET_PATH_ENV, self.socket_path);
+        try self.environ.put(nlock.ENV_SOCKET_PATH, self.socket_path);
 
         self.child = try std.process.spawn(io, .{
             .argv = &.{build_options.nlockd_path},

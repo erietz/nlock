@@ -4,14 +4,15 @@ const cli = @import("cli.zig");
 const protocol = @import("protocol.zig");
 const hash = @import("hash.zig");
 const queue = @import("queue.zig");
+pub const log = @import("log.zig");
 
 pub const SOCKET_PATH = "/tmp/nlock.sock";
-pub const SOCKET_PATH_ENV = "NLOCK_SOCKET";
+pub const ENV_SOCKET_PATH = "NLOCK_SOCKET";
 
 /// Returns the socket path from the `NLOCK_SOCKET` environment variable,
 /// falling back to `SOCKET_PATH`.
 pub fn socketPath(environ_map: *const std.process.Environ.Map) []const u8 {
-    return environ_map.get(SOCKET_PATH_ENV) orelse SOCKET_PATH;
+    return environ_map.get(ENV_SOCKET_PATH) orelse SOCKET_PATH;
 }
 pub const Command = cli.Command;
 pub const RunOptions = cli.RunOptions;
