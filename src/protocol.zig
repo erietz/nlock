@@ -64,16 +64,19 @@ pub const LockRequest = struct {
             bytes,
             .{},
         );
+        defer parsed.deinit();
         const lock_request = parsed.value;
+
+        const name = try allocator.dupe(u8, lock_request.name);
+        errdefer allocator.free(name);
+        const command = try allocator.dupe(u8, lock_request.command);
+        errdefer allocator.free(command);
 
         return .init(
             lock_request.request_type,
-            allocator.dupe(u8, lock_request.name) catch return error.OutOfMemory,
+            name,
             lock_request.global,
-            allocator.dupe(u8, lock_request.command) catch {
-                allocator.free(lock_request.name);
-                return error.OutOfMemory;
-            },
+            command,
         );
     }
 };
@@ -149,7 +152,8 @@ test "LockRequest.fromJson correctly handles colon in command" {
 test "LockRequest.fromJson correctly handles newline in command" {
     const allocator = std.testing.allocator;
     const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"command\":\"echo Hello\\nWorld\"}";
-    const lock_request = try LockRequest.fromJson(json, allocator);
+    var lock_request = try LockRequest.fromJson(json, allocator);
+    defer lock_request.deinit(allocator);
 
     try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(lock_request.request_type));
     try std.testing.expectEqualStrings("mylock", lock_request.name);
