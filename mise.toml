@@ -1,3 +1,21 @@
 [tools]
 zig = "0.16.0"
 zls = "0.16.0"
+
+[tasks.build]
+run = "zig build"
+
+[tasks."test:unit"]
+run = "zig build test"
+
+[tasks."test:integration"]
+run = "zig build test-integration"
+
+[tasks."test"]
+depends = ["test:unit", "test:integration"]
+
+[tasks."test:tmux"]
+depends = "test"
+env.COMMAND = "sh -c 'echo testing && sleep 3'"
+env.NLOCK_LOG_LEVEL = "Debug"
+run = "./tmux_tests.sh"

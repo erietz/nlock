@@ -5,8 +5,6 @@ set -euo pipefail
 tmux set-environment -g NLOCK_LOG_LEVEL "${NLOCK_LOG_LEVEL}"
 COMMAND="${COMMAND:-sleep 3}"
 
-zig build
-
 # open a new tmux window and split the window into two panes
 tmux new-window -n "Test Window"
 
