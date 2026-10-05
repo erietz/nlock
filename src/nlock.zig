@@ -100,31 +100,93 @@ pub fn runList(init: std.process.Init) !void {
 
     try nlock.writeLine(&writer.interface, list_message);
 
-    // Print a header for the table of the list of locks
-    nlock.printer.print("{s:<12} {s:<8} {s:<80}\n", .{ "NAME", "GLOBAL", "CMD" }) catch |err| {
+    // // Print a header for the table of the list of locks
+    // nlock.printer.print("{s:<12} {s:<8} {s:<80}\n", .{ "NAME", "GLOBAL", "CMD" }) catch |err| {
+    //     log(ll.Error, "Failed to print lock list header: {s}", .{@errorName(err)});
+    // };
+    //
+    // // Print the list of locks received from the server in a tabular format
+    // while (true) {
+    //     const response_message = (try reader.interface.takeDelimiter('\n')) orelse break;
+    //     log(ll.Debug, "Received lock response: {s}", .{response_message});
+    //
+    //     var lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
+    //     defer lock_request.deinit(allocator);
+    //
+    //     // nlock.printer.print("Lock Name: {s}, Global: {}, Command: {s}\n", .{
+    //     //     lock_request.name,
+    //     //     lock_request.global,
+    //     //     lock_request.command,
+    //     // }) catch |err| {
+    //     //     log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});
+    //     // };
+    //
+    //     nlock.printer.print("{s:<12} {:<8} {s:<80}\n", .{
+    //         lock_request.name,
+    //         lock_request.global,
+    //         lock_request.command,
+    //     }) catch |err| {
+    //         log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});
+    //     };
+    // }
+
+    var lock_requests = try readLockRequests(&reader.interface, allocator);
+    defer {
+        for (lock_requests.items) |*lock_request| lock_request.deinit(allocator);
+        lock_requests.deinit(allocator);
+    }
+
+    try printLockRequestTable(lock_requests);
+}
+
+fn readLockRequests(
+    reader: *Io.Reader,
+    allocator: std.mem.Allocator,
+) !std.ArrayList(nlock.LockRequest) {
+    var lock_requests: std.ArrayList(nlock.LockRequest) = .empty;
+    errdefer {
+        for (lock_requests.items) |*lock_request| lock_request.deinit(allocator);
+        lock_requests.deinit(allocator);
+    }
+    while (true) {
+        const response_message = try (reader.takeDelimiter('\n')) orelse break;
+        log(ll.Debug, "Received lock request: {s}", .{response_message});
+
+        var lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
+        errdefer lock_request.deinit(allocator);
+
+        try lock_requests.append(allocator, lock_request);
+    }
+    return lock_requests;
+}
+
+fn printLockRequestTable(lock_requests: std.ArrayList(nlock.LockRequest)) !void {
+    var max_name_len: usize = "NAME".len;
+    var max_cmd_len: usize = "CMD".len;
+    for (lock_requests.items) |lock_request| {
+        max_name_len = @max(max_name_len, lock_request.name.len);
+        max_cmd_len = @max(max_cmd_len, lock_request.command.len);
+    }
+
+    nlock.printer.print("| {[name]s:<[name_width]} | {[global]s:<[global_width]} | {[cmd]s:<[cmd_width]} |\n", .{
+        .name = "NAME",
+        .name_width = max_name_len,
+        .global = "GLOBAL",
+        .global_width = 8,
+        .cmd = "CMD",
+        .cmd_width = max_cmd_len,
+    }) catch |err| {
         log(ll.Error, "Failed to print lock list header: {s}", .{@errorName(err)});
     };
 
-    // Print the list of locks received from the server in a tabular format
-    while (true) {
-        const response_message = (try reader.interface.takeDelimiter('\n')) orelse break;
-        log(ll.Debug, "Received lock response: {s}", .{response_message});
-
-        var lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
-        defer lock_request.deinit(allocator);
-
-        // nlock.printer.print("Lock Name: {s}, Global: {}, Command: {s}\n", .{
-        //     lock_request.name,
-        //     lock_request.global,
-        //     lock_request.command,
-        // }) catch |err| {
-        //     log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});
-        // };
-
-        nlock.printer.print("{s:<12} {:<8} {s:<80}\n", .{
-            lock_request.name,
-            lock_request.global,
-            lock_request.command,
+    for (lock_requests.items) |lock_request| {
+        nlock.printer.print("| {[name]s:<[name_width]} | {[global]s:<[global_width]} | {[cmd]s:<[cmd_width]} |\n", .{
+            .name = lock_request.name,
+            .name_width = max_name_len,
+            .global = if (lock_request.global) "true" else "false",
+            .global_width = 8,
+            .cmd = lock_request.command,
+            .cmd_width = max_cmd_len,
         }) catch |err| {
             log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});
         };
