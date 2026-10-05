@@ -5,15 +5,14 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
-const log = nlock.log.log;
-const ll = nlock.log.LogLevel;
+const log = nlock.logger.log;
+const ll = nlock.logger.LogLevel;
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
         switch (err) {
             error.InvalidArguments => {
-                const usage = nlock.usage();
-                std.debug.print("{s}", .{usage});
+                std.debug.print("{s}", .{nlock.cli.USAGE});
             },
             error.LockAlreadyAcquired => {
                 std.debug.print("Lock is already acquired by another process.\n", .{});
@@ -27,21 +26,16 @@ pub fn main(init: std.process.Init) void {
 }
 
 pub fn run(init: std.process.Init) !void {
-    const log_level_str = init.environ_map.get(nlock.log.ENV_NLOCK_LOG_LEVEL) orelse @tagName(ll.None);
-    const log_level = std.meta.stringToEnum(nlock.log.LogLevel, log_level_str) orelse blk: {
-        log(ll.Warn, "Invalid log level: {s}. Defaulting to None.", .{log_level_str});
-        break :blk ll.None;
-    };
-    nlock.log.init(log_level);
-
+    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
+    nlock.printer.init(init.io);
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    switch (try nlock.Command.parseArgs(args)) {
+    switch (try nlock.cli.Command.parseArgs(args)) {
         .run => |options| try runLocked(init, options),
         .list => try runList(init),
     }
 }
 
-pub fn runLocked(init: std.process.Init, options: nlock.RunOptions) !void {
+pub fn runLocked(init: std.process.Init, options: nlock.cli.RunOptions) !void {
     const address = try std.Io.net.UnixAddress.init(nlock.getSocketPath(init.environ_map));
     const stream = try address.connect(init.io);
     defer stream.close(init.io);
@@ -106,6 +100,12 @@ pub fn runList(init: std.process.Init) !void {
 
     try nlock.writeLine(&writer.interface, list_message);
 
+    // Print a header for the table of the list of locks
+    nlock.printer.print("{s:<12} {s:<8} {s:<80}\n", .{ "NAME", "GLOBAL", "CMD" }) catch |err| {
+        log(ll.Error, "Failed to print lock list header: {s}", .{@errorName(err)});
+    };
+
+    // Print the list of locks received from the server in a tabular format
     while (true) {
         const response_message = (try reader.interface.takeDelimiter('\n')) orelse break;
         log(ll.Debug, "Received lock response: {s}", .{response_message});
@@ -113,12 +113,21 @@ pub fn runList(init: std.process.Init) !void {
         var lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
         defer lock_request.deinit(allocator);
 
-        // TODO: this should be stdout output not log to stderr
-        log(ll.Warn, "Lock Name: {s}, Global: {}, Command: {s}", .{
+        // nlock.printer.print("Lock Name: {s}, Global: {}, Command: {s}\n", .{
+        //     lock_request.name,
+        //     lock_request.global,
+        //     lock_request.command,
+        // }) catch |err| {
+        //     log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});
+        // };
+
+        nlock.printer.print("{s:<12} {:<8} {s:<80}\n", .{
             lock_request.name,
             lock_request.global,
             lock_request.command,
-        });
+        }) catch |err| {
+            log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});
+        };
     }
 }
 
@@ -126,7 +135,7 @@ pub fn acquireLock(
     allocator: std.mem.Allocator,
     writer: *Io.Writer,
     reader: *Io.Reader,
-    options: nlock.RunOptions,
+    options: nlock.cli.RunOptions,
 ) !nlock.LockResponseStatus {
     const command_str = std.mem.join(allocator, " ", options.command) catch {
         log(ll.Error, "Failed to join command arguments", .{});
@@ -150,7 +159,7 @@ pub fn releaseLock(
     allocator: std.mem.Allocator,
     writer: *Io.Writer,
     reader: *Io.Reader,
-    options: nlock.RunOptions,
+    options: nlock.cli.RunOptions,
 ) !nlock.LockResponseStatus {
     const command_str = std.mem.join(allocator, " ", options.command) catch {
         log(ll.Error, "Failed to join command arguments", .{});

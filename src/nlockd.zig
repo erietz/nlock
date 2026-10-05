@@ -1,8 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
-const log = nlock.log.log;
-const ll = nlock.log.LogLevel;
+const log = nlock.logger.log;
+const ll = nlock.logger.LogLevel;
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
@@ -19,7 +19,7 @@ pub fn run(init: std.process.Init) !void {
 pub fn runServer(init: std.process.Init) !void {
     const io = init.io;
     const socket_path = nlock.getSocketPath(init.environ_map);
-    nlock.log.init(nlock.log.getLogLevel(init.environ_map));
+    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
 
     std.Io.Dir.cwd().deleteFile(io, socket_path) catch |err| switch (err) {
         error.FileNotFound => {},
