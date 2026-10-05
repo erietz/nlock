@@ -91,7 +91,49 @@ test "list succeeds with no locks held" {
     defer gpa.free(result.stderr);
 
     try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
-    try std.testing.expectEqualStrings("", result.stdout);
+    try std.testing.expectEqualStrings("| NAME | GLOBAL   | CMD |\n", result.stdout);
+}
+
+test "three different locks can be held at the same time and listed" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    var a_done = false;
+    var b_done = false;
+    var c_done = false;
+    var client_a = try daemon.spawnClient(gpa, io, &.{ "run", "lock-a", "--", "sleep", "1" });
+    defer if (!a_done) client_a.kill(io);
+    var client_b = try daemon.spawnClient(gpa, io, &.{ "run", "lock-b", "--", "sleep", "1" });
+    defer if (!b_done) client_b.kill(io);
+    var client_c = try daemon.spawnClient(gpa, io, &.{ "run", "lock-c", "--", "sleep", "1" });
+    defer if (!c_done) client_c.kill(io);
+
+    const result = try daemon.client(gpa, io, &.{"list"});
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+    const expected_contents =
+        \\| NAME   | GLOBAL   | CMD     |
+        \\| lock-b | false    | sleep 1 |
+        \\| lock-c | false    | sleep 1 |
+        \\| lock-a | false    | sleep 1 |
+        \\
+    ;
+    try std.testing.expectEqualStrings(
+        expected_contents,
+        result.stdout,
+    );
+
+    a_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_a.wait(io));
+    b_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_b.wait(io));
+    c_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_c.wait(io));
 }
 
 test "client fails when no daemon is running" {
