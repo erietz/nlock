@@ -240,8 +240,39 @@ fn handleAcquireLockRequest(
         // Queue up the command to be executed when the acquired lock is
         // released
         existing_lock.waiters.append(&waiter.node);
-        // Wait for the lock to be released. This does not happen until the
-        // client sends a release lock request, which will signal this waiter.
+
+        if (lock_request.timeout) |timeout_s| {
+            log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_name_copy, timeout_s });
+            // TODO: This is not a safe type cast. We should use a safe cast or
+            // check the value before casting.
+            const timeout = std.Io.Timeout{ .duration = .{
+                .clock = .awake,
+                .raw = std.Io.Duration.fromSeconds(@intCast(timeout_s)),
+            } };
+
+            // Wait for the lock to be released. This does not happen until the
+            // client sends a release lock request, which will signal this
+            // waiter. Or if the timeout expires, we will return a timeout
+            // error to the client.
+            waiter.event.waitTimeout(io, timeout) catch |err| switch (err) {
+                error.Timeout => {
+                    log(ll.Info, "Timeout while waiting for lock '{s}' to be released", .{lock_name_copy});
+                    // Remove the waiter from the queue since it timed out
+                    existing_lock.waiters.remove(&waiter.node);
+                    const timeout_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Timeout).toJson(allocator);
+                    defer allocator.free(timeout_response);
+                    try nlock.writeLine(writer, timeout_response);
+                    return error.Timeout;
+                },
+                else => return err,
+            };
+        } else {
+            // Wait for the lock to be released. This does not happen until the
+            // client sends a release lock request, which will signal this waiter.
+            log(ll.Debug, "Waiting for lock '{s}' to be released without timeout", .{lock_name_copy});
+            try waiter.event.wait(io);
+        }
+
         log(ll.Debug, "Waiting for lock '{s}' to be released", .{lock_name_copy});
         try waiter.event.wait(io);
     }

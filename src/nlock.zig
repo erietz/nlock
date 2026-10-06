@@ -20,6 +20,12 @@ pub fn main(init: std.process.Init) void {
             error.LockServerNotRunning => {
                 std.debug.print("Lock server is not running. Please start the lock server first.\n", .{});
             },
+            error.LockAcquireTimeout => {
+                std.debug.print("Failed to acquire lock within the specified timeout.\n", .{});
+            },
+            error.LockReleaseFailed => {
+                std.debug.print("Failed to release lock. Please check the lock server logs for more details.\n", .{});
+            },
             else => {
                 std.debug.print("An unexpected error occurred: {s}\n", .{@errorName(err)});
             },
@@ -81,6 +87,8 @@ pub fn runLocked(init: std.process.Init, options: nlock.cli.RunOptions) !void {
         }
     } else if (acquireStatus == nlock.LockResponseStatus.Busy) {
         return error.LockAlreadyAcquired;
+    } else if (acquireStatus == nlock.LockResponseStatus.Timeout) {
+        return error.LockAcquireTimeout;
     } else {
         std.debug.print("Received unknown lock response status.\n", .{});
         return error.UnknownLockResponse;
