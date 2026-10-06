@@ -35,6 +35,7 @@ pub const RunOptions = struct {
     global: bool,
     command: []const [:0]const u8,
     nonblock: bool = false,
+    timeout: ?u64 = null,
 
     /// Parses the arguments following `run`: `<name> [--global] -- <command> [args...]`
     pub fn parseArgs(args: []const [:0]const u8) !RunOptions {
@@ -43,6 +44,7 @@ pub const RunOptions = struct {
             .name = "",
             .command = &.{},
             .nonblock = false,
+            .timeout = null,
         };
 
         const double_dash_index = for (args, 0..) |arg, i| {
@@ -56,11 +58,27 @@ pub const RunOptions = struct {
             return error.InvalidArguments; // No command provided after "--"
         }
 
-        for (args[0..double_dash_index]) |arg| {
+        var skip_next = false;
+        for (args[0..double_dash_index], 0..) |arg, i| {
+            if (skip_next) {
+                skip_next = false;
+                continue;
+            }
+
             if (std.mem.eql(u8, arg, "--global") or std.mem.eql(u8, arg, "-g")) {
                 options.global = true;
             } else if (std.mem.eql(u8, arg, "--nonblock") or std.mem.eql(u8, arg, "-n")) {
                 options.nonblock = true;
+            } else if (std.mem.eql(u8, arg, "--timeout") or std.mem.eql(u8, arg, "-t")) {
+                if (i + 1 >= double_dash_index) {
+                    return error.InvalidArguments; // No value provided for --timeout
+                }
+                const timeout_str = args[i + 1];
+                const timeout_value = std.fmt.parseInt(u64, timeout_str, 10) catch {
+                    return error.InvalidArguments; // Invalid integer for --timeout
+                };
+                options.timeout = timeout_value;
+                skip_next = true; // Skip the next argument since it's the value for --timeout
             } else if (options.name.len == 0) {
                 options.name = arg;
             } else {
@@ -145,6 +163,7 @@ test "RunOptions.parseArgs with name and command" {
     try std.testing.expectEqualStrings("mylock", result.name);
     try std.testing.expectEqual(false, result.global);
     try std.testing.expectEqual(false, result.nonblock);
+    try std.testing.expectEqual(null, result.timeout);
     const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
     try std.testing.expectEqualDeep(expected_command, result.command);
 }
@@ -154,6 +173,8 @@ test "RunOptions.parseArgs with global flag" {
     const result = try RunOptions.parseArgs(args);
     try std.testing.expectEqualStrings("mylock", result.name);
     try std.testing.expectEqual(true, result.global);
+    try std.testing.expectEqual(false, result.nonblock);
+    try std.testing.expectEqual(null, result.timeout);
     const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
     try std.testing.expectEqualDeep(expected_command, result.command);
 }
@@ -164,6 +185,18 @@ test "RunOptions.parseArgs with nonblock flag" {
     try std.testing.expectEqualStrings("mylock", result.name);
     try std.testing.expectEqual(false, result.global);
     try std.testing.expectEqual(true, result.nonblock);
+    try std.testing.expectEqual(null, result.timeout);
+    const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
+    try std.testing.expectEqualDeep(expected_command, result.command);
+}
+
+test "RunOptions.parseArgs with timeout flag" {
+    const args: []const [:0]const u8 = &.{ "--timeout", "30", "mylock", "--", "echo", "Hello" };
+    const result = try RunOptions.parseArgs(args);
+    try std.testing.expectEqualStrings("mylock", result.name);
+    try std.testing.expectEqual(false, result.global);
+    try std.testing.expectEqual(false, result.nonblock);
+    try std.testing.expectEqual(30, result.timeout.?);
     const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
     try std.testing.expectEqualDeep(expected_command, result.command);
 }
@@ -173,6 +206,8 @@ test "RunOptions.parseArgs with flags after positional arguments" {
     const result = try RunOptions.parseArgs(args);
     try std.testing.expectEqualStrings("mylock", result.name);
     try std.testing.expectEqual(true, result.global);
+    try std.testing.expectEqual(false, result.nonblock);
+    try std.testing.expectEqual(null, result.timeout);
     const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
     try std.testing.expectEqualDeep(expected_command, result.command);
 }
