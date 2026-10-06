@@ -18,6 +18,7 @@ pub const LockRequest = struct {
     name: []const u8,
     global: bool,
     nonblock: bool,
+    timeout: ?u64,
     command: []const u8,
 
     pub fn init(
@@ -25,6 +26,7 @@ pub const LockRequest = struct {
         name: []const u8,
         global: bool,
         nonblock: bool,
+        timeout: ?u64,
         command: []const u8,
     ) LockRequest {
         return LockRequest{
@@ -32,6 +34,7 @@ pub const LockRequest = struct {
             .name = name,
             .global = global,
             .nonblock = nonblock,
+            .timeout = timeout,
             .command = command,
         };
     }
@@ -80,6 +83,7 @@ pub const LockRequest = struct {
             name,
             lock_request.global,
             lock_request.nonblock,
+            lock_request.timeout,
             command,
         );
     }
@@ -92,9 +96,10 @@ test "LockRequest.toJson serializes LockRequest correctly" {
         .name = "mylock",
         .global = true,
         .nonblock = false,
+        .timeout = null,
         .command = "echo Hello",
     };
-    const expected = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"command\":\"echo Hello\"}";
+    const expected = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\"}";
 
     const json = try request.toJson(allocator);
     defer allocator.free(json);
@@ -104,12 +109,13 @@ test "LockRequest.toJson serializes LockRequest correctly" {
 
 test "LockRequest.fromJson deserializes JSON into LockRequest correctly" {
     const allocator = std.testing.allocator;
-    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"command\":\"echo Hello\"}";
+    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\"}";
     const expected = LockRequest{
         .request_type = LockRequestType.AcquireLock,
         .name = "mylock",
         .global = true,
         .nonblock = false,
+        .timeout = null,
         .command = "echo Hello",
     };
 
@@ -120,6 +126,7 @@ test "LockRequest.fromJson deserializes JSON into LockRequest correctly" {
     try std.testing.expectEqualStrings(request.name, expected.name);
     try std.testing.expectEqual(request.global, expected.global);
     try std.testing.expectEqual(request.nonblock, expected.nonblock);
+    try std.testing.expectEqual(request.timeout, expected.timeout);
     try std.testing.expectEqualStrings(request.command, expected.command);
 }
 
@@ -129,8 +136,9 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
         .request_type = LockRequestType.AcquireLock,
         .name = "mylock",
         .global = true,
-        .command = "echo Hello",
         .nonblock = false,
+        .timeout = 30,
+        .command = "echo Hello",
     };
 
     const json = try original.toJson(allocator);
@@ -143,12 +151,13 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
     try std.testing.expectEqualStrings(request.name, original.name);
     try std.testing.expectEqual(request.global, original.global);
     try std.testing.expectEqual(request.nonblock, original.nonblock);
+    try std.testing.expectEqual(request.timeout, original.timeout);
     try std.testing.expectEqualStrings(request.command, original.command);
 }
 
 test "LockRequest.fromJson correctly handles colon in command" {
     const allocator = std.testing.allocator;
-    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"command\":\"echo Hello:World\"}";
+    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":30,\"command\":\"echo Hello:World\"}";
     var lock_request = try LockRequest.fromJson(json, allocator);
     defer lock_request.deinit(allocator);
 
@@ -156,12 +165,13 @@ test "LockRequest.fromJson correctly handles colon in command" {
     try std.testing.expectEqualStrings("mylock", lock_request.name);
     try std.testing.expectEqual(true, lock_request.global);
     try std.testing.expectEqual(false, lock_request.nonblock);
+    try std.testing.expectEqual(30, lock_request.timeout.?);
     try std.testing.expectEqualStrings("echo Hello:World", lock_request.command);
 }
 
 test "LockRequest.fromJson correctly handles newline in command" {
     const allocator = std.testing.allocator;
-    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"command\":\"echo Hello\\nWorld\"}";
+    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\\nWorld\"}";
     var lock_request = try LockRequest.fromJson(json, allocator);
     defer lock_request.deinit(allocator);
 
@@ -169,6 +179,7 @@ test "LockRequest.fromJson correctly handles newline in command" {
     try std.testing.expectEqualStrings("mylock", lock_request.name);
     try std.testing.expectEqual(true, lock_request.global);
     try std.testing.expectEqual(false, lock_request.nonblock);
+    try std.testing.expectEqual(null, lock_request.timeout);
     try std.testing.expectEqualStrings("echo Hello\nWorld", lock_request.command);
 }
 

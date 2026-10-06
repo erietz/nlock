@@ -100,7 +100,7 @@ pub fn runList(init: std.process.Init) !void {
 
     const allocator = init.gpa;
     const list_message = try nlock.LockRequest
-        .init(nlock.LockRequestType.ListLocks, "", false, false, "")
+        .init(nlock.LockRequestType.ListLocks, "", false, false, null, "")
         .toJson(allocator);
     defer allocator.free(list_message);
 
@@ -181,7 +181,7 @@ pub fn acquireLock(
     };
     defer allocator.free(command_str);
     const message = try nlock.LockRequest
-        .init(nlock.LockRequestType.AcquireLock, options.name, options.global, options.nonblock, command_str)
+        .init(nlock.LockRequestType.AcquireLock, options.name, options.global, options.nonblock, options.timeout, command_str)
         .toJson(allocator);
     defer allocator.free(message);
 
@@ -205,7 +205,7 @@ pub fn releaseLock(
     };
     defer allocator.free(command_str);
     const release_message = try nlock.LockRequest
-        .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, options.nonblock, command_str)
+        .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, options.nonblock, options.timeout, command_str)
         .toJson(allocator);
     defer allocator.free(release_message);
 

@@ -158,13 +158,14 @@ fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !nlock.LockRequ
 }
 
 test "readRequest parses a valid LockRequest where command contains newlines" {
-    const message = "{\"request_type\":\"AcquireLock\",\"name\":\"my_lock\",\"global\":false,\"nonblock\":false,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}\n";
+    const message = "{\"request_type\":\"AcquireLock\",\"name\":\"my_lock\",\"global\":false,\"nonblock\":false,\"timeout\":null,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}\n";
     const allocator = std.testing.allocator;
     const expected_request = nlock.LockRequest.init(
         nlock.LockRequestType.AcquireLock,
         "my_lock",
         false,
         false,
+        null,
         "echo 'Hello, World!'\necho 'This is a test.'\n",
     );
 
@@ -175,6 +176,7 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     try std.testing.expectEqual(expected_request.request_type, request.request_type);
     try std.testing.expectEqualStrings(expected_request.name, request.name);
     try std.testing.expectEqual(expected_request.global, request.global);
+    try std.testing.expectEqual(expected_request.nonblock, request.nonblock);
     try std.testing.expectEqualStrings(expected_request.command, request.command);
 }
 
@@ -303,6 +305,7 @@ fn handleListLocksRequest(
             lock_name,
             false,
             false,
+            null,
             lock_command,
         ).toJson(allocator);
         defer allocator.free(lock_info);
