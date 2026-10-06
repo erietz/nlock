@@ -34,6 +34,7 @@ pub const RunOptions = struct {
     name: []const u8,
     global: bool,
     command: []const [:0]const u8,
+    nonblock: bool = false,
 
     /// Parses the arguments following `run`: `<name> [--global] -- <command> [args...]`
     pub fn parseArgs(args: []const [:0]const u8) !RunOptions {
@@ -41,6 +42,7 @@ pub const RunOptions = struct {
             .global = false,
             .name = "",
             .command = &.{},
+            .nonblock = false,
         };
 
         const double_dash_index = for (args, 0..) |arg, i| {
@@ -55,8 +57,10 @@ pub const RunOptions = struct {
         }
 
         for (args[0..double_dash_index]) |arg| {
-            if (std.mem.eql(u8, arg, "--global")) {
+            if (std.mem.eql(u8, arg, "--global") or std.mem.eql(u8, arg, "-g")) {
                 options.global = true;
+            } else if (std.mem.eql(u8, arg, "--nonblock") or std.mem.eql(u8, arg, "-n")) {
+                options.nonblock = true;
             } else if (options.name.len == 0) {
                 options.name = arg;
             } else {
@@ -140,6 +144,7 @@ test "RunOptions.parseArgs with name and command" {
     const result = try RunOptions.parseArgs(args);
     try std.testing.expectEqualStrings("mylock", result.name);
     try std.testing.expectEqual(false, result.global);
+    try std.testing.expectEqual(false, result.nonblock);
     const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
     try std.testing.expectEqualDeep(expected_command, result.command);
 }
@@ -149,6 +154,16 @@ test "RunOptions.parseArgs with global flag" {
     const result = try RunOptions.parseArgs(args);
     try std.testing.expectEqualStrings("mylock", result.name);
     try std.testing.expectEqual(true, result.global);
+    const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
+    try std.testing.expectEqualDeep(expected_command, result.command);
+}
+
+test "RunOptions.parseArgs with nonblock flag" {
+    const args: []const [:0]const u8 = &.{ "--nonblock", "mylock", "--", "echo", "Hello" };
+    const result = try RunOptions.parseArgs(args);
+    try std.testing.expectEqualStrings("mylock", result.name);
+    try std.testing.expectEqual(false, result.global);
+    try std.testing.expectEqual(true, result.nonblock);
     const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
     try std.testing.expectEqualDeep(expected_command, result.command);
 }

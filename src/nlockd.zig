@@ -158,11 +158,12 @@ fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !nlock.LockRequ
 }
 
 test "readRequest parses a valid LockRequest where command contains newlines" {
-    const message = "{\"request_type\":\"AcquireLock\",\"name\":\"my_lock\",\"global\":false,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}\n";
+    const message = "{\"request_type\":\"AcquireLock\",\"name\":\"my_lock\",\"global\":false,\"nonblock\":false,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}\n";
     const allocator = std.testing.allocator;
     const expected_request = nlock.LockRequest.init(
         nlock.LockRequestType.AcquireLock,
         "my_lock",
+        false,
         false,
         "echo 'Hello, World!'\necho 'This is a test.'\n",
     );
