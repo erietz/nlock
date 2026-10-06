@@ -37,7 +37,9 @@ pub fn main(init: std.process.Init) void {
 pub fn run(init: std.process.Init) !void {
     nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
     nlock.printer.init(init.io);
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const allocator = init.arena.allocator();
+    const args = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(args);
     switch (try nlock.cli.Command.parseArgs(args)) {
         .run => |options| try runLocked(init, options),
         .list => try runList(init),
@@ -58,8 +60,9 @@ pub fn runLocked(init: std.process.Init, options: nlock.cli.RunOptions) !void {
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
 
+    const gpa = init.gpa;
     const acquireStatus = try acquireLock(
-        init.arena.allocator(),
+        gpa,
         &writer.interface,
         &reader.interface,
         options,
@@ -75,7 +78,7 @@ pub fn runLocked(init: std.process.Init, options: nlock.cli.RunOptions) !void {
 
         log(ll.Debug, "Command finished. Releasing lock: {s}", .{options.name});
         const releaseStatus = try releaseLock(
-            init.arena.allocator(),
+            gpa,
             &writer.interface,
             &reader.interface,
             options,
