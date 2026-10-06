@@ -17,6 +17,9 @@ pub fn main(init: std.process.Init) void {
             error.LockAlreadyAcquired => {
                 std.debug.print("Lock is already acquired by another process.\n", .{});
             },
+            error.LockServerNotRunning => {
+                std.debug.print("Lock server is not running. Please start the lock server first.\n", .{});
+            },
             else => {
                 std.debug.print("An unexpected error occurred: {s}\n", .{@errorName(err)});
             },
@@ -37,7 +40,10 @@ pub fn run(init: std.process.Init) !void {
 
 pub fn runLocked(init: std.process.Init, options: nlock.cli.RunOptions) !void {
     const address = try std.Io.net.UnixAddress.init(nlock.getSocketPath(init.environ_map));
-    const stream = try address.connect(init.io);
+    const stream = address.connect(init.io) catch |err| {
+        log(ll.Error, "Failed to connect to lock server: {s}", .{@errorName(err)});
+        return error.LockServerNotRunning;
+    };
     defer stream.close(init.io);
 
     var write_buffer: [1024]u8 = undefined;
@@ -94,7 +100,7 @@ pub fn runList(init: std.process.Init) !void {
 
     const allocator = init.gpa;
     const list_message = try nlock.LockRequest
-        .init(nlock.LockRequestType.ListLocks, "", false, "")
+        .init(nlock.LockRequestType.ListLocks, "", false, false, "")
         .toJson(allocator);
     defer allocator.free(list_message);
 
@@ -175,7 +181,7 @@ pub fn acquireLock(
     };
     defer allocator.free(command_str);
     const message = try nlock.LockRequest
-        .init(nlock.LockRequestType.AcquireLock, options.name, options.global, command_str)
+        .init(nlock.LockRequestType.AcquireLock, options.name, options.global, options.nonblock, command_str)
         .toJson(allocator);
     defer allocator.free(message);
 
@@ -199,7 +205,7 @@ pub fn releaseLock(
     };
     defer allocator.free(command_str);
     const release_message = try nlock.LockRequest
-        .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, command_str)
+        .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, options.nonblock, command_str)
         .toJson(allocator);
     defer allocator.free(release_message);
 

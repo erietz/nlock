@@ -18,7 +18,10 @@ tmux send-keys -t 1 "./zig-out/bin/nlockd" C-m
 tmux split-window -v -t 2
 
 # Split the right pane into three panes
-tmux split-window -v -t 3
+tmux split-window -v -t 2
+
+# Split the right pane into four panes
+tmux split-window -v -t 4
 
 # Wait for the server to start
 sleep 2
@@ -33,3 +36,10 @@ sleep 1
 
 # Send a command to the bottom right pane from the client
 tmux send-keys -t 4 "./zig-out/bin/nlock run test -- ${COMMAND}" C-m
+sleep 1
+
+# Send a non-blocking command to the right pane from the client
+tmux send-keys -t 5 "./zig-out/bin/nlock run test --nonblock -- ${COMMAND}" C-m
+
+# Clean up the environment variable after the test
+tmux set-environment -gu NLOCK_LOG_LEVEL

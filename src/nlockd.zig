@@ -223,6 +223,14 @@ fn handleAcquireLockRequest(
             log(ll.Error, "Lock for name '{s}' was removed before we could add a waiter", .{lock_name_copy});
             return error.LockAlreadyAcquired;
         };
+
+        if (lock_request.nonblock) {
+            const busy_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toJson(allocator);
+            defer allocator.free(busy_response);
+            try nlock.writeLine(writer, busy_response);
+            return;
+        }
+
         var waiter = nlock.Waiter{
             .event = .unset,
             .command = command_copy,
@@ -293,6 +301,7 @@ fn handleListLocksRequest(
         const lock_info = try nlock.LockRequest.init(
             nlock.LockRequestType.AcquireLock,
             lock_name,
+            false,
             false,
             lock_command,
         ).toJson(allocator);
