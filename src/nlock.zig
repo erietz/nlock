@@ -100,36 +100,6 @@ pub fn runList(init: std.process.Init) !void {
 
     try nlock.writeLine(&writer.interface, list_message);
 
-    // // Print a header for the table of the list of locks
-    // nlock.printer.print("{s:<12} {s:<8} {s:<80}\n", .{ "NAME", "GLOBAL", "CMD" }) catch |err| {
-    //     log(ll.Error, "Failed to print lock list header: {s}", .{@errorName(err)});
-    // };
-    //
-    // // Print the list of locks received from the server in a tabular format
-    // while (true) {
-    //     const response_message = (try reader.interface.takeDelimiter('\n')) orelse break;
-    //     log(ll.Debug, "Received lock response: {s}", .{response_message});
-    //
-    //     var lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
-    //     defer lock_request.deinit(allocator);
-    //
-    //     // nlock.printer.print("Lock Name: {s}, Global: {}, Command: {s}\n", .{
-    //     //     lock_request.name,
-    //     //     lock_request.global,
-    //     //     lock_request.command,
-    //     // }) catch |err| {
-    //     //     log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});
-    //     // };
-    //
-    //     nlock.printer.print("{s:<12} {:<8} {s:<80}\n", .{
-    //         lock_request.name,
-    //         lock_request.global,
-    //         lock_request.command,
-    //     }) catch |err| {
-    //         log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});
-    //     };
-    // }
-
     var lock_requests = try readLockRequests(&reader.interface, allocator);
     defer {
         for (lock_requests.items) |*lock_request| lock_request.deinit(allocator);
@@ -179,7 +149,7 @@ fn printLockRequestTable(lock_requests: std.ArrayList(nlock.LockRequest)) !void 
         log(ll.Error, "Failed to print lock list header: {s}", .{@errorName(err)});
     };
 
-    for (lock_requests.items) |lock_request| {
+    for (lock_requests.items) |*lock_request| {
         nlock.printer.print("| {[name]s:<[name_width]} | {[global]s:<[global_width]} | {[cmd]s:<[cmd_width]} |\n", .{
             .name = lock_request.name,
             .name_width = max_name_len,
