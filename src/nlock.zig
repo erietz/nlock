@@ -14,7 +14,7 @@ const Context = struct {
 };
 
 pub fn main(init: std.process.Init) void {
-    run(init) catch |err| {
+    subMain(init) catch |err| {
         switch (err) {
             error.InvalidArguments => {
                 std.debug.print("{s}", .{nlock.cli.USAGE});
@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) void {
     };
 }
 
-pub fn run(init: std.process.Init) !void {
+pub fn subMain(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.gpa);
     defer init.gpa.free(args);
     const command = try nlock.cli.Command.parseArgs(args);
