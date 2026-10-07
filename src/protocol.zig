@@ -192,6 +192,8 @@ pub const LockResponse = struct {
         };
     }
 
+    /// Serializes the LockResponse to a JSON string.
+    /// Allocates memory for the JSON string, which must be freed by the caller.
     pub fn toJson(
         self: LockResponse,
         allocator: std.mem.Allocator,
@@ -205,7 +207,6 @@ pub const LockResponse = struct {
     }
 
     /// Deserializes a JSON string into a LockResponse.
-    /// Allocates memory for the LockResponse, which must be freed by the caller.
     pub fn fromJson(
         bytes: []const u8,
         allocator: std.mem.Allocator,

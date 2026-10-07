@@ -3,6 +3,7 @@ const std = @import("std");
 pub const USAGE =
     \\Usage: nlock run <name> [--global] -- <command> [args...]
     \\       nlock list
+    \\
 ;
 
 pub const Command = union(enum) {
