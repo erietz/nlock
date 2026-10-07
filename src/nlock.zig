@@ -125,47 +125,67 @@ pub fn runList(ctx: Context) !void {
 
     try nlock.writeLine(ctx.writer, list_message);
 
-    var lock_requests = try readLockRequests(ctx.reader, ctx.allocator);
+    var lock_infos = try readLockInfos(ctx.reader, ctx.allocator);
     defer {
-        for (lock_requests.items) |*lock_request| lock_request.deinit(ctx.allocator);
-        lock_requests.deinit(ctx.allocator);
+        for (lock_infos.items) |*lock_info| lock_info.deinit(ctx.allocator);
+        lock_infos.deinit(ctx.allocator);
     }
 
-    try printLockRequestTable(lock_requests);
+    try printLockInfoTable(ctx.allocator, lock_infos);
 }
 
-fn readLockRequests(
+fn readLockInfos(
     reader: *Io.Reader,
     allocator: std.mem.Allocator,
-) !std.ArrayList(nlock.LockRequest) {
-    var lock_requests: std.ArrayList(nlock.LockRequest) = .empty;
+) !std.ArrayList(nlock.LockInfo) {
+    var lock_infos: std.ArrayList(nlock.LockInfo) = .empty;
     errdefer {
-        for (lock_requests.items) |*lock_request| lock_request.deinit(allocator);
-        lock_requests.deinit(allocator);
+        for (lock_infos.items) |*lock_info| lock_info.deinit(allocator);
+        lock_infos.deinit(allocator);
     }
     while (true) {
         const response_message = try (reader.takeDelimiter('\n')) orelse break;
-        log(ll.Debug, "Received lock request: {s}", .{response_message});
+        log(ll.Debug, "Received lock info: {s}", .{response_message});
 
-        var lock_request = try nlock.LockRequest.fromJson(response_message, allocator);
-        errdefer lock_request.deinit(allocator);
+        var lock_info = try nlock.LockInfo.fromJson(response_message, allocator);
+        errdefer lock_info.deinit(allocator);
 
-        try lock_requests.append(allocator, lock_request);
+        try lock_infos.append(allocator, lock_info);
     }
-    return lock_requests;
+    return lock_infos;
 }
 
-fn printLockRequestTable(lock_requests: std.ArrayList(nlock.LockRequest)) !void {
-    var max_name_len: usize = "NAME".len;
-    var max_cmd_len: usize = "CMD".len;
-    for (lock_requests.items) |lock_request| {
-        max_name_len = @max(max_name_len, lock_request.name.len);
-        max_cmd_len = @max(max_cmd_len, lock_request.command.len);
+fn printLockInfoTable(allocator: std.mem.Allocator, lock_infos: std.ArrayList(nlock.LockInfo)) !void {
+    // Resolve each uid to a username up front so the column can be sized.
+    // getpwuid returns static storage, so each name is copied.
+    const users = try allocator.alloc([]const u8, lock_infos.items.len);
+    var users_len: usize = 0;
+    defer {
+        for (users[0..users_len]) |user| allocator.free(user);
+        allocator.free(users);
+    }
+    for (lock_infos.items) |lock_info| {
+        var uid_buf: [16]u8 = undefined;
+        users[users_len] = try allocator.dupe(u8, nlock.peer.userName(&uid_buf, lock_info.uid));
+        users_len += 1;
     }
 
-    nlock.printer.print("| {[name]s:<[name_width]} | {[global]s:<[global_width]} | {[cmd]s:<[cmd_width]} |\n", .{
+    var max_name_len: usize = "NAME".len;
+    var max_user_len: usize = "USER".len;
+    var max_cmd_len: usize = "CMD".len;
+    for (lock_infos.items, users) |lock_info, user| {
+        max_name_len = @max(max_name_len, lock_info.name.len);
+        max_user_len = @max(max_user_len, user.len);
+        max_cmd_len = @max(max_cmd_len, lock_info.command.len);
+    }
+
+    const row_fmt = "| {[name]s:<[name_width]} | {[user]s:<[user_width]} | {[global]s:<[global_width]} | {[cmd]s:<[cmd_width]} |\n";
+
+    nlock.printer.print(row_fmt, .{
         .name = "NAME",
         .name_width = max_name_len,
+        .user = "USER",
+        .user_width = max_user_len,
         .global = "GLOBAL",
         .global_width = 8,
         .cmd = "CMD",
@@ -174,13 +194,15 @@ fn printLockRequestTable(lock_requests: std.ArrayList(nlock.LockRequest)) !void 
         log(ll.Error, "Failed to print lock list header: {s}", .{@errorName(err)});
     };
 
-    for (lock_requests.items) |*lock_request| {
-        nlock.printer.print("| {[name]s:<[name_width]} | {[global]s:<[global_width]} | {[cmd]s:<[cmd_width]} |\n", .{
-            .name = lock_request.name,
+    for (lock_infos.items, users) |lock_info, user| {
+        nlock.printer.print(row_fmt, .{
+            .name = lock_info.name,
             .name_width = max_name_len,
-            .global = if (lock_request.global) "true" else "false",
+            .user = user,
+            .user_width = max_user_len,
+            .global = if (lock_info.global) "true" else "false",
             .global_width = 8,
-            .cmd = lock_request.command,
+            .cmd = lock_info.command,
             .cmd_width = max_cmd_len,
         }) catch |err| {
             log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});

@@ -6,6 +6,7 @@ const queue = @import("queue.zig");
 pub const logger = @import("logger.zig");
 pub const printer = @import("printer.zig");
 pub const cli = @import("cli.zig");
+pub const peer = @import("peer.zig");
 
 pub const SOCKET_PATH = "/tmp/nlock.sock";
 pub const ENV_SOCKET_PATH = "NLOCK_SOCKET";
@@ -19,6 +20,7 @@ pub const LockResponseStatus = protocol.LockResponseStatus;
 pub const LockRequestType = protocol.LockRequestType;
 pub const LockRequest = protocol.LockRequest;
 pub const LockResponse = protocol.LockResponse;
+pub const LockInfo = protocol.LockInfo;
 pub const writeLine = protocol.writeLine;
 pub const ThreadSafeHashMap = hash.ThreadSafeHashMap;
 pub const Lock = queue.Lock;
@@ -29,6 +31,7 @@ test {
     _ = protocol;
     _ = hash;
     _ = queue;
+    _ = peer;
 }
 
 /// This is a documentation comment to explain the `printAnotherMessage` function below.

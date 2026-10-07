@@ -183,6 +183,84 @@ test "LockRequest.fromJson correctly handles newline in command" {
     try std.testing.expectEqualStrings("echo Hello\nWorld", lock_request.command);
 }
 
+/// One row of the `list` response: a lock currently held, and who holds it.
+pub const LockInfo = struct {
+    name: []const u8,
+    uid: u32,
+    global: bool,
+    command: []const u8,
+
+    pub fn deinit(self: *LockInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.command);
+    }
+
+    /// Serializes the LockInfo to a JSON string.
+    /// Allocates memory for the JSON string, which must be freed by the caller.
+    pub fn toJson(
+        self: LockInfo,
+        allocator: std.mem.Allocator,
+    ) ![]u8 {
+        return std.json.Stringify.valueAlloc(
+            allocator,
+            self,
+            .{ .whitespace = .minified },
+        );
+    }
+
+    /// Deserializes a JSON string into a LockInfo.
+    /// Allocates memory for the LockInfo, which must be freed by the caller.
+    pub fn fromJson(
+        bytes: []const u8,
+        allocator: std.mem.Allocator,
+    ) !LockInfo {
+        const parsed = try std.json.parseFromSlice(
+            LockInfo,
+            allocator,
+            bytes,
+            .{},
+        );
+        defer parsed.deinit();
+        const lock_info = parsed.value;
+
+        const name = try allocator.dupe(u8, lock_info.name);
+        errdefer allocator.free(name);
+        const command = try allocator.dupe(u8, lock_info.command);
+
+        return .{
+            .name = name,
+            .uid = lock_info.uid,
+            .global = lock_info.global,
+            .command = command,
+        };
+    }
+};
+
+test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
+    const allocator = std.testing.allocator;
+    const original = LockInfo{
+        .name = "mylock",
+        .uid = 501,
+        .global = true,
+        .command = "echo Hello",
+    };
+
+    const json = try original.toJson(allocator);
+    defer allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"name\":\"mylock\",\"uid\":501,\"global\":true,\"command\":\"echo Hello\"}",
+        json,
+    );
+
+    var info = try LockInfo.fromJson(json, allocator);
+    defer info.deinit(allocator);
+
+    try std.testing.expectEqualStrings(original.name, info.name);
+    try std.testing.expectEqual(original.uid, info.uid);
+    try std.testing.expectEqual(original.global, info.global);
+    try std.testing.expectEqualStrings(original.command, info.command);
+}
+
 pub const LockResponse = struct {
     status: LockResponseStatus,
 

@@ -41,8 +41,13 @@ Locks are managed by the **nlockd** daemon, which must be running before
     it succeeded.
 
 **list**
-:   Print a table of the locks currently held, with the lock name and the
-    command holding it. Takes no arguments.
+:   Print a table of the locks currently held. Each row shows the lock name,
+    the user holding it, whether it was requested with **\-\-global**, and
+    the command running under it. Takes no arguments.
+
+    The user is taken from the kernel's credentials for the connecting
+    socket, so it cannot be spoofed by the client. It is shown as a username,
+    or as a numeric user ID if it has no entry in the user database.
 
 # OPTIONS
 
@@ -112,8 +117,8 @@ Start the daemon with a custom socket and debug logging:
 
 # BUGS
 
-Report bugs to <https://github.com/erietz/nlock/issues>
+Report bugs to https://github.com/erietz/nlock/issues
 
 # AUTHOR
 
-Ethan Rietz <ewrietz@gmail.com>
+Ethan Rietz ewrietz@gmail.com

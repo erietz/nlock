@@ -5,26 +5,36 @@ pub const Waiter = struct {
     event: Io.Event = .unset,
     node: std.DoublyLinkedList.Node = .{},
     command: []const u8,
+    uid: u32,
+    global: bool,
 };
 
 pub const Lock = struct {
     waiters: std.DoublyLinkedList = .{},
     command: []const u8,
+    uid: u32,
+    global: bool,
 };
 
 test "Lock and Waiter structures" {
     var lock = Lock{
         .command = "test command",
+        .uid = 0,
+        .global = false,
     };
 
     var waiter1 = Waiter{
         .event = .unset,
         .command = "waiter1 command",
+        .uid = 0,
+        .global = false,
     };
 
     var waiter2 = Waiter{
         .event = .unset,
         .command = "waiter2 command",
+        .uid = 0,
+        .global = false,
     };
 
     lock.waiters.append(&waiter1.node);
@@ -38,6 +48,8 @@ test "Waiter event handling" {
     var waiter = Waiter{
         .event = .unset,
         .command = "waiter command",
+        .uid = 0,
+        .global = false,
     };
 
     // Initially, the event should be unset

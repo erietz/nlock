@@ -36,6 +36,8 @@ pub fn build(b: *std.Build) void {
         // of this module, you will have to make sure to re-export them from
         // the root file.
         .root_source_file = b.path("src/root.zig"),
+        // libc provides getpeereid/getsockopt and getpwuid (see src/peer.zig).
+        .link_libc = true,
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,

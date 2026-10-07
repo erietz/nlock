@@ -1,5 +1,6 @@
 const std = @import("std");
 const harness = @import("harness.zig");
+const nlock = @import("nlock");
 
 const Term = std.process.Child.Term;
 
@@ -91,7 +92,7 @@ test "list succeeds with no locks held" {
     defer gpa.free(result.stderr);
 
     try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
-    try std.testing.expectEqualStrings("| NAME | GLOBAL   | CMD |\n", result.stdout);
+    try std.testing.expectEqualStrings("| NAME | USER | GLOBAL   | CMD |\n", result.stdout);
 }
 
 test "three different locks can be held at the same time and listed" {
@@ -108,7 +109,7 @@ test "three different locks can be held at the same time and listed" {
     defer if (!a_done) client_a.kill(io);
     var client_b = try daemon.spawnClient(gpa, io, &.{ "run", "lock-b", "--", "sleep", "1" });
     defer if (!b_done) client_b.kill(io);
-    var client_c = try daemon.spawnClient(gpa, io, &.{ "run", "lock-c", "--", "sleep", "1" });
+    var client_c = try daemon.spawnClient(gpa, io, &.{ "run", "--global", "lock-c", "--", "sleep", "1" });
     defer if (!c_done) client_c.kill(io);
 
     const result = try daemon.client(gpa, io, &.{"list"});
@@ -116,13 +117,19 @@ test "three different locks can be held at the same time and listed" {
     defer gpa.free(result.stderr);
 
     try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
-    const expected_contents =
-        \\| NAME   | GLOBAL   | CMD     |
-        \\| lock-b | false    | sleep 1 |
-        \\| lock-c | false    | sleep 1 |
-        \\| lock-a | false    | sleep 1 |
+    // All three clients run as the current user, whom the daemon identifies
+    // from the socket's peer credentials.
+    var uid_buf: [16]u8 = undefined;
+    const user = nlock.peer.userName(&uid_buf, std.c.getuid());
+    const user_width = @max("USER".len, user.len);
+    const expected_contents = try std.fmt.allocPrint(gpa,
+        \\| NAME   | {[h]s:<[w]} | GLOBAL   | CMD     |
+        \\| lock-b | {[u]s:<[w]} | false    | sleep 1 |
+        \\| lock-c | {[u]s:<[w]} | true     | sleep 1 |
+        \\| lock-a | {[u]s:<[w]} | false    | sleep 1 |
         \\
-    ;
+    , .{ .h = "USER", .u = user, .w = user_width });
+    defer gpa.free(expected_contents);
     try std.testing.expectEqualStrings(
         expected_contents,
         result.stdout,

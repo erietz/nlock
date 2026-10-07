@@ -94,6 +94,13 @@ fn handleConnection(
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
 
+    // Ask the kernel who is on the other end of the socket rather than
+    // trusting a uid sent by the client.
+    const uid = nlock.peer.peerUid(stream) catch |err| {
+        log(ll.Error, "Failed to get peer credentials: {s}", .{@errorName(err)});
+        return err;
+    };
+
     // Client current follows this simple ACQUIRE -> EXECUTE -> RELEASE
     // pattern, but this will change when implementing the `list` command, for
     // example.
@@ -108,6 +115,7 @@ fn handleConnection(
                 io,
                 allocator,
                 req,
+                uid,
                 map,
                 &writer.interface,
             ) catch |err| {
@@ -184,6 +192,7 @@ fn handleAcquireLockRequest(
     io: Io,
     allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest,
+    uid: u32,
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
 ) !void {
@@ -202,6 +211,8 @@ fn handleAcquireLockRequest(
 
     const lock = nlock.Lock{
         .command = command_copy,
+        .uid = uid,
+        .global = lock_request.global,
     };
 
     const acquired = map.tryPut(lock_name_copy, lock) catch |err| {
@@ -211,8 +222,9 @@ fn handleAcquireLockRequest(
     };
 
     if (acquired) {
-        log(ll.Info, "Acquired lock for name '{s}' (global: {}). Command: {s}", .{
+        log(ll.Info, "Acquired lock for name '{s}' (uid: {d}, global: {}). Command: {s}", .{
             lock_request.name,
+            uid,
             lock_request.global,
             lock_request.command,
         });
@@ -236,6 +248,8 @@ fn handleAcquireLockRequest(
         var waiter = nlock.Waiter{
             .event = .unset,
             .command = command_copy,
+            .uid = uid,
+            .global = lock_request.global,
         };
         // Queue up the command to be executed when the acquired lock is
         // released
@@ -301,7 +315,10 @@ fn handleReleaseLockRequest(
     if (map.getPtr(lock_request.name)) |lock_ptr| {
         if (lock_ptr.waiters.popFirst()) |waiter_node| {
             var w: *nlock.Waiter = @fieldParentPtr("node", waiter_node);
-            lock_ptr.command = w.command; // Update the lock's command to the waiter's command
+            // The lock now belongs to the waiter
+            lock_ptr.command = w.command;
+            lock_ptr.uid = w.uid;
+            lock_ptr.global = w.global;
             // Signal the waiter that the lock has been released
             w.event.set(io);
             // allocator.free(w.command); // Free the waiter's command after signaling
@@ -328,17 +345,13 @@ fn handleListLocksRequest(
 ) !void {
     var it = map.map.iterator();
     while (it.next()) |entry| {
-        const lock_name = entry.key_ptr.*;
-        const lock_command = entry.value_ptr.*.command;
-
-        const lock_info = try nlock.LockRequest.init(
-            nlock.LockRequestType.AcquireLock,
-            lock_name,
-            false,
-            false,
-            null,
-            lock_command,
-        ).toJson(allocator);
+        const lock = entry.value_ptr.*;
+        const lock_info = try (nlock.LockInfo{
+            .name = entry.key_ptr.*,
+            .uid = lock.uid,
+            .global = lock.global,
+            .command = lock.command,
+        }).toJson(allocator);
         defer allocator.free(lock_info);
 
         try nlock.writeLine(writer, lock_info);
