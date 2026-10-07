@@ -104,6 +104,15 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(nlockd_exe);
 
+    // Generate the man page from Markdown with pandoc. Because the output is
+    // captured, the Run step is cached and only re-runs when the source
+    // changes.
+    const man_cmd = b.addSystemCommand(&.{ "pandoc", "--standalone", "--to", "man" });
+    man_cmd.addFileArg(b.path("doc/nlock.1.md"));
+    const man_page = man_cmd.captureStdOut(.{});
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(man_page, .prefix, "share/man/man1/nlock.1").step);
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(man_page, .prefix, "share/man/man1/nlockd.1").step);
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.

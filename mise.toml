@@ -21,4 +21,4 @@ env.NLOCK_LOG_LEVEL = "Debug"
 run = "./tmux_tests.sh"
 
 [tasks."install"]
-run = "zig build install --prefix-exe-dir $HOME/.local/bin --prefix-lib-dir $HOME/.local/lib --prefix-include-dir $HOME/.local/include"
+run = "zig build install --prefix $HOME/.local"
