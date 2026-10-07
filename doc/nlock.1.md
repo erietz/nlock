@@ -40,6 +40,12 @@ Locks are managed by the **nlockd** daemon, which must be running before
     **\-\-**. The lock is released when the command finishes, whether or not
     it succeeded.
 
+    While the command runs, **nlock** ignores **SIGINT** and **SIGQUIT**;
+    the terminal sends them to the command as well, and **nlock** releases
+    the lock once the command exits. If **nlock** itself is killed, or loses
+    its connection to **nlockd** for any reason, the daemon releases the lock
+    on its behalf.
+
 **list**
 :   Print a table of the locks currently held. Each row shows the lock name,
     the user holding it, whether it was requested with **\-\-global**, and

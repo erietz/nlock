@@ -1,5 +1,3 @@
-// TODO: Need to handle ctrl-c and other signals to release the lock properly
-
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
@@ -84,6 +82,8 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !void {
     switch (acquire_status) {
         nlock.LockResponseStatus.Ok => {
             log(ll.Debug, "Lock acquired successfully. Running command", .{});
+            // TODO: nlock exits 0 even when the command fails or is killed
+            // by a signal. Propagate the command's exit status instead.
             runCommand(ctx.io, options.command) catch |err| {
                 // Even if the command fails, we should still attempt to release
                 // the lock so no return error here, just log the error
@@ -275,7 +275,26 @@ pub fn releaseLock(
     return release_response.status;
 }
 
+/// Handler which does absolutely nothing installed while the command runs. A
+/// handler rather than SIG_IGN, because ignored signals are inherited across
+/// exec while handlers are reset to the default, so the child still gets the
+/// usual behavior.
+fn ignoreSignal(_: std.posix.SIG) callconv(.c) void {}
+
+/// Signals the terminal sends to the whole foreground process group. The
+/// child receives them too, so nlock outlives it and can release the lock.
+const terminal_signals = [_]std.posix.SIG{ .INT, .QUIT };
+
 pub fn runCommand(io: Io, command: []const []const u8) !void {
+    var old_actions: [terminal_signals.len]std.posix.Sigaction = undefined;
+    const act: std.posix.Sigaction = .{
+        .handler = .{ .handler = ignoreSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.RESTART,
+    };
+    for (terminal_signals, &old_actions) |sig, *old| std.posix.sigaction(sig, &act, old);
+    defer for (terminal_signals, &old_actions) |sig, *old| std.posix.sigaction(sig, old, null);
+
     const spawnOptions: std.process.SpawnOptions = .{
         .argv = command,
     };

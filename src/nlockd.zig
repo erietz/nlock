@@ -111,7 +111,7 @@ fn handleConnection(
     defer req.deinit(allocator);
     switch (req.request_type) {
         nlock.LockRequestType.AcquireLock => {
-            handleAcquireLockRequest(
+            const holding = handleAcquireLockRequest(
                 io,
                 allocator,
                 req,
@@ -122,6 +122,8 @@ fn handleConnection(
                 log(ll.Error, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
                 return err;
             };
+            // Nonblocking request for a busy lock: nothing to release.
+            if (!holding) return;
         },
         nlock.LockRequestType.ListLocks => {
             return handleListLocksRequest(allocator, map, &writer.interface) catch |err| {
@@ -134,6 +136,14 @@ fn handleConnection(
             return error.UnexpectedRequestType;
         },
     }
+
+    // If the client goes away without releasing (e.g. it was killed by a
+    // signal), release the lock on its behalf so it is not held forever.
+    var released = false;
+    defer if (!released) {
+        log(ll.Info, "Client disconnected while holding lock '{s}'. Releasing it.", .{req.name});
+        _ = releaseLock(io, allocator, map, req.name);
+    };
 
     // The client executes the command and then sends a release lock request
     log(ll.Debug, "Waiting for release lock request from client", .{});
@@ -151,6 +161,7 @@ fn handleConnection(
                 log(ll.Debug, "Failed to handle release lock request: {s}", .{@errorName(err)});
                 return err;
             };
+            released = true;
         },
         else => {
             log(ll.Debug, "Received unexpected request type: {d}", .{release_req.request_type});
@@ -188,6 +199,8 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     try std.testing.expectEqualStrings(expected_request.command, request.command);
 }
 
+/// Returns true if the connection now holds the lock, or false if the lock
+/// was busy and the request was nonblocking.
 fn handleAcquireLockRequest(
     io: Io,
     allocator: std.mem.Allocator,
@@ -195,7 +208,7 @@ fn handleAcquireLockRequest(
     uid: u32,
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
-) !void {
+) !bool {
     // Check and insert in one atomic step so two clients racing for the same
     // name cannot both acquire it.
     // The map owns copies of both the name and the command: `lock_request`
@@ -238,11 +251,13 @@ fn handleAcquireLockRequest(
             return error.LockAlreadyAcquired;
         };
 
+        // TODO: lock_name_copy is never freed on this path, and on the
+        // busy/timeout paths below command_copy leaks too.
         if (lock_request.nonblock) {
             const busy_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toJson(allocator);
             defer allocator.free(busy_response);
             try nlock.writeLine(writer, busy_response);
-            return;
+            return false;
         }
 
         var waiter = nlock.Waiter{
@@ -291,6 +306,10 @@ fn handleAcquireLockRequest(
         try waiter.event.wait(io);
     }
 
+    // The lock is ours now. If the client cannot be told (e.g. it was killed
+    // while queued), pass the lock on to the next waiter.
+    errdefer _ = releaseLock(io, allocator, map, lock_request.name);
+
     log(ll.Info, "Sending acquired response for lock {s}.", .{lock_name_copy});
     const acquired_response = try nlock.LockResponse
         .init(
@@ -298,6 +317,7 @@ fn handleAcquireLockRequest(
         ).toJson(allocator);
     defer allocator.free(acquired_response);
     try nlock.writeLine(writer, acquired_response);
+    return true;
 }
 
 fn handleReleaseLockRequest(
@@ -312,21 +332,7 @@ fn handleReleaseLockRequest(
         lock_request.global,
     });
 
-    if (map.getPtr(lock_request.name)) |lock_ptr| {
-        if (lock_ptr.waiters.popFirst()) |waiter_node| {
-            var w: *nlock.Waiter = @fieldParentPtr("node", waiter_node);
-            // The lock now belongs to the waiter
-            lock_ptr.command = w.command;
-            lock_ptr.uid = w.uid;
-            lock_ptr.global = w.global;
-            // Signal the waiter that the lock has been released
-            w.event.set(io);
-            // allocator.free(w.command); // Free the waiter's command after signaling
-        } else {
-            allocator.free(lock_ptr.command);
-            _ = map.remove(lock_request.name);
-        }
-
+    if (releaseLock(io, allocator, map, lock_request.name)) {
         log(ll.Info, "Lock for name '{s}' released successfully.", .{lock_request.name});
         const lock_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toJson(allocator);
         defer allocator.free(lock_response);
@@ -336,6 +342,33 @@ fn handleReleaseLockRequest(
 
     log(ll.Error, "No lock found for name '{s}' to release.", .{lock_request.name});
     return error.LockNotFound;
+}
+
+/// Hands the lock to the next waiter, or removes it if there is none.
+/// Returns false if no lock with that name exists.
+fn releaseLock(
+    io: Io,
+    allocator: std.mem.Allocator,
+    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    name: []const u8,
+) bool {
+    const lock_ptr = map.getPtr(name) orelse return false;
+    if (lock_ptr.waiters.popFirst()) |waiter_node| {
+        var w: *nlock.Waiter = @fieldParentPtr("node", waiter_node);
+        // The lock now belongs to the waiter
+        lock_ptr.command = w.command;
+        lock_ptr.uid = w.uid;
+        lock_ptr.global = w.global;
+        // Signal the waiter that the lock has been released
+        w.event.set(io);
+        // allocator.free(w.command); // Free the waiter's command after signaling
+    } else {
+        allocator.free(lock_ptr.command);
+        // TODO: this leaks the key; the map owns a copy of the name made
+        // in handleAcquireLockRequest. Use fetchRemove and free it.
+        _ = map.remove(name);
+    }
+    return true;
 }
 
 fn handleListLocksRequest(

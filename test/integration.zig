@@ -143,6 +143,77 @@ test "three different locks can be held at the same time and listed" {
     try std.testing.expectEqual(Term{ .exited = 0 }, try client_c.wait(io));
 }
 
+test "lock is released when the holding client is killed" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const log_path = try daemon.tmpPath(gpa, "log");
+    defer gpa.free(log_path);
+    const go_path = try daemon.tmpPath(gpa, "go");
+    defer gpa.free(go_path);
+    // Let the orphaned command exit once the test is over.
+    defer daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" }) catch {};
+
+    const script = try std.fmt.allocPrint(
+        gpa,
+        "echo start >> {s}; while [ ! -f {s} ]; do sleep 0.01; done",
+        .{ log_path, go_path },
+    );
+    defer gpa.free(script);
+    var holder = try daemon.spawnClient(gpa, io, &.{ "run", "mylock", "--", "sh", "-c", script });
+    try waitForFileContents(gpa, io, daemon.tmp.dir, "log", "start\n");
+
+    // SIGKILL gives the client no chance to send a release request.
+    holder.kill(io);
+
+    const result = try daemon.client(gpa, io, &.{ "run", "--timeout", "5", "mylock", "--", "true" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+}
+
+test "client survives SIGINT and releases the lock after the command exits" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const log_path = try daemon.tmpPath(gpa, "log");
+    defer gpa.free(log_path);
+    const go_path = try daemon.tmpPath(gpa, "go");
+    defer gpa.free(go_path);
+
+    const script = try std.fmt.allocPrint(
+        gpa,
+        "echo start >> {0s}; while [ ! -f {1s} ]; do sleep 0.01; done; echo end >> {0s}",
+        .{ log_path, go_path },
+    );
+    defer gpa.free(script);
+    var holder = try daemon.spawnClient(gpa, io, &.{ "run", "mylock", "--", "sh", "-c", script });
+    var holder_done = false;
+    defer if (!holder_done) holder.kill(io);
+    try waitForFileContents(gpa, io, daemon.tmp.dir, "log", "start\n");
+
+    // Only the client is interrupted here, not its command. It must keep
+    // running until the command finishes rather than abandon the lock.
+    try std.posix.kill(holder.id.?, .INT);
+    try io.sleep(.fromMilliseconds(100), .awake);
+    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
+
+    holder_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
+    try expectFileContents(gpa, io, daemon.tmp.dir, "log", "start\nend\n");
+
+    const result = try daemon.client(gpa, io, &.{ "run", "--nonblock", "mylock", "--", "true" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+}
+
 test "client fails when no daemon is running" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
