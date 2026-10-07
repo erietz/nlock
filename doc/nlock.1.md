@@ -14,14 +14,15 @@ nlock, nlockd - run commands while holding named locks
 
 **nlock run** [**-g**] [**-n**] [**-t** *seconds*] *name* **\-\-** *command* [*args*...]
 
-**nlock list**
+**nlock list** [**\-\-json** | **-q**] [**-H**]
 
 **nlockd**
 
 # DESCRIPTION
 
 **nlock** serializes commands across processes and terminals using named
-locks. Each lock is identified by an arbitrary *name*. While one **nlock run**
+locks. Each lock is identified by a *name*, which may contain any characters
+except whitespace and control characters. While one **nlock run**
 holds a lock, any other **nlock run** for the same *name* waits until the lock
 is released, then runs its own command. Waiters are served in the order they
 arrived.
@@ -46,16 +47,46 @@ Locks are managed by the **nlockd** daemon, which must be running before
     its connection to **nlockd** for any reason, the daemon releases the lock
     on its behalf.
 
-**list**
-:   Print a table of the locks currently held. Each row shows the lock name,
-    the user holding it, whether it was requested with **\-\-global**, and
-    the command running under it. Takes no arguments.
+**list** [**\-\-json** | **-q**] [**-H**]
+:   Print the locks currently held, one per line, sorted by name. By default
+    the output is whitespace-aligned columns with a header row. When no
+    locks are held, only the header row is printed, and **list** still exits
+    **0**. The columns are:
 
-    The user is taken from the kernel's credentials for the connecting
-    socket, so it cannot be spoofed by the client. It is shown as a username,
-    or as a numeric user ID if it has no entry in the user database.
+    **NAME**
+    :   The lock name.
+
+    **USER**
+    :   The user holding the lock, as a username, or as a numeric user ID if
+        it has no entry in the user database. It is taken from the kernel's
+        credentials for the connecting socket, so it cannot be spoofed by the
+        client.
+
+    **PID**
+    :   Process ID of the **nlock** client holding the lock (not of its
+        command), or **-** if the platform cannot report it.
+
+    **SCOPE**
+    :   **global** if the lock was requested with **\-\-global**, otherwise
+        **user**.
+
+    **ELAPSED**
+    :   How long the current holder has held the lock, as
+        [[*dd*-]*hh*:]*mm*:*ss*, like **ps -o etime**.
+
+    **WAITERS**
+    :   Number of clients queued for the lock.
+
+    **CMD**
+    :   The command running under the lock. It is always the last column,
+        since it is the only one that may contain spaces; every other column
+        can be split on whitespace. Control characters are shown escaped
+        (**\\n**, **\\t**, **\\r**, **\\x***NN*) so each lock stays on one
+        line.
 
 # OPTIONS
+
+## run
 
 **-g**, **\-\-global**
 :   Request a global lock. This flag is accepted and sent to the daemon, but
@@ -69,6 +100,21 @@ Locks are managed by the **nlockd** daemon, which must be running before
 :   Wait at most *seconds* (a non-negative integer) for the lock. If the lock
     is not acquired in time, exit with an error without running the command.
     Without this option, **nlock** waits indefinitely.
+
+## list
+
+**\-\-json**
+:   Print one JSON object per lock, one per line, with the fields **name**,
+    **user**, **uid**, **pid**, **global**, **waiters**, **acquired_at**
+    (seconds since the Unix epoch) and **command**. Names and commands are
+    reproduced exactly, so prefer this format in scripts. Cannot be combined
+    with **-q**.
+
+**-q**, **\-\-quiet**
+:   Print only lock names, one per line.
+
+**-H**, **\-\-no-header**
+:   Omit the header row from the default output.
 
 # NLOCKD
 
@@ -116,6 +162,18 @@ Wait at most 30 seconds for the lock:
 Run a shell pipeline under a lock:
 
     nlock run logs -- sh -c 'cat *.log | gzip > logs.gz'
+
+Show the locks that have clients queued for them:
+
+    nlock list -H | awk '$6 > 0 { print $1 }'
+
+Check whether a lock is currently held:
+
+    nlock list -q | grep -qx build && echo "build is locked"
+
+List the commands running under global locks:
+
+    nlock list --json | jq -r 'select(.global) | .command'
 
 Start the daemon with a custom socket and debug logging:
 

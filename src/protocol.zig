@@ -187,7 +187,14 @@ test "LockRequest.fromJson correctly handles newline in command" {
 pub const LockInfo = struct {
     name: []const u8,
     uid: u32,
+    /// Pid of the `nlock` client holding the lock, or 0 if unknown.
+    pid: i32,
     global: bool,
+    /// Number of clients queued for the lock.
+    waiters: usize,
+    /// When the current holder acquired the lock, in seconds since the Unix
+    /// epoch.
+    acquired_at: i64,
     command: []const u8,
 
     pub fn deinit(self: *LockInfo, allocator: std.mem.Allocator) void {
@@ -230,7 +237,10 @@ pub const LockInfo = struct {
         return .{
             .name = name,
             .uid = lock_info.uid,
+            .pid = lock_info.pid,
             .global = lock_info.global,
+            .waiters = lock_info.waiters,
+            .acquired_at = lock_info.acquired_at,
             .command = command,
         };
     }
@@ -241,14 +251,17 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
     const original = LockInfo{
         .name = "mylock",
         .uid = 501,
+        .pid = 4242,
         .global = true,
+        .waiters = 2,
+        .acquired_at = 1791331200,
         .command = "echo Hello",
     };
 
     const json = try original.toJson(allocator);
     defer allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"name\":\"mylock\",\"uid\":501,\"global\":true,\"command\":\"echo Hello\"}",
+        "{\"name\":\"mylock\",\"uid\":501,\"pid\":4242,\"global\":true,\"waiters\":2,\"acquired_at\":1791331200,\"command\":\"echo Hello\"}",
         json,
     );
 
@@ -257,7 +270,10 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
 
     try std.testing.expectEqualStrings(original.name, info.name);
     try std.testing.expectEqual(original.uid, info.uid);
+    try std.testing.expectEqual(original.pid, info.pid);
     try std.testing.expectEqual(original.global, info.global);
+    try std.testing.expectEqual(original.waiters, info.waiters);
+    try std.testing.expectEqual(original.acquired_at, info.acquired_at);
     try std.testing.expectEqualStrings(original.command, info.command);
 }
 

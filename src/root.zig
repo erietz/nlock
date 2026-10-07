@@ -32,6 +32,7 @@ test {
     _ = hash;
     _ = queue;
     _ = peer;
+    _ = logger;
 }
 
 /// This is a documentation comment to explain the `printAnotherMessage` function below.

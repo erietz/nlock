@@ -96,7 +96,7 @@ fn handleConnection(
 
     // Ask the kernel who is on the other end of the socket rather than
     // trusting a uid sent by the client.
-    const uid = nlock.peer.peerUid(stream) catch |err| {
+    const peer = nlock.peer.peerCredentials(stream) catch |err| {
         log(ll.Error, "Failed to get peer credentials: {s}", .{@errorName(err)});
         return err;
     };
@@ -115,7 +115,7 @@ fn handleConnection(
                 io,
                 allocator,
                 req,
-                uid,
+                peer,
                 map,
                 &writer.interface,
             ) catch |err| {
@@ -205,7 +205,7 @@ fn handleAcquireLockRequest(
     io: Io,
     allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest,
-    uid: u32,
+    peer: nlock.peer.Credentials,
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
 ) !bool {
@@ -224,8 +224,10 @@ fn handleAcquireLockRequest(
 
     const lock = nlock.Lock{
         .command = command_copy,
-        .uid = uid,
+        .uid = peer.uid,
+        .pid = peer.pid,
         .global = lock_request.global,
+        .acquired_at = nowSeconds(io),
     };
 
     const acquired = map.tryPut(lock_name_copy, lock) catch |err| {
@@ -235,9 +237,10 @@ fn handleAcquireLockRequest(
     };
 
     if (acquired) {
-        log(ll.Info, "Acquired lock for name '{s}' (uid: {d}, global: {}). Command: {s}", .{
+        log(ll.Info, "Acquired lock for name '{s}' (uid: {d}, pid: {d}, global: {}). Command: {s}", .{
             lock_request.name,
-            uid,
+            peer.uid,
+            peer.pid,
             lock_request.global,
             lock_request.command,
         });
@@ -263,7 +266,8 @@ fn handleAcquireLockRequest(
         var waiter = nlock.Waiter{
             .event = .unset,
             .command = command_copy,
-            .uid = uid,
+            .uid = peer.uid,
+            .pid = peer.pid,
             .global = lock_request.global,
         };
         // Queue up the command to be executed when the acquired lock is
@@ -358,7 +362,9 @@ fn releaseLock(
         // The lock now belongs to the waiter
         lock_ptr.command = w.command;
         lock_ptr.uid = w.uid;
+        lock_ptr.pid = w.pid;
         lock_ptr.global = w.global;
+        lock_ptr.acquired_at = nowSeconds(io);
         // Signal the waiter that the lock has been released
         w.event.set(io);
         // allocator.free(w.command); // Free the waiter's command after signaling
@@ -371,22 +377,45 @@ fn releaseLock(
     return true;
 }
 
+fn nowSeconds(io: Io) i64 {
+    return Io.Timestamp.now(io, .real).toSeconds();
+}
+
 fn handleListLocksRequest(
     allocator: std.mem.Allocator,
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
 ) !void {
-    var it = map.map.iterator();
-    while (it.next()) |entry| {
-        const lock = entry.value_ptr.*;
-        const lock_info = try (nlock.LockInfo{
-            .name = entry.key_ptr.*,
-            .uid = lock.uid,
-            .global = lock.global,
-            .command = lock.command,
-        }).toJson(allocator);
-        defer allocator.free(lock_info);
-
-        try nlock.writeLine(writer, lock_info);
+    // Serialize every lock while holding the mutex so the snapshot is
+    // consistent, but write to the socket only after releasing it so a slow
+    // client cannot stall other connections.
+    var lines: std.ArrayList([]u8) = .empty;
+    defer {
+        for (lines.items) |line| allocator.free(line);
+        lines.deinit(allocator);
     }
+    {
+        map.mutex.lockUncancelable(map.io);
+        defer map.mutex.unlock(map.io);
+
+        var it = map.map.iterator();
+        while (it.next()) |entry| {
+            const lock = entry.value_ptr;
+            const line = try (nlock.LockInfo{
+                .name = entry.key_ptr.*,
+                .uid = lock.uid,
+                .pid = lock.pid,
+                .global = lock.global,
+                .waiters = lock.waiters.len(),
+                .acquired_at = lock.acquired_at,
+                .command = lock.command,
+            }).toJson(allocator);
+            lines.append(allocator, line) catch |err| {
+                allocator.free(line);
+                return err;
+            };
+        }
+    }
+
+    for (lines.items) |line| try nlock.writeLine(writer, line);
 }

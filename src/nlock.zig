@@ -67,7 +67,7 @@ pub fn run(init: std.process.Init) !void {
 
     switch (command) {
         .run => |options| try runLocked(ctx, options),
-        .list => try runList(ctx),
+        .list => |options| try runList(ctx, options),
     }
 }
 
@@ -117,7 +117,7 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !void {
     }
 }
 
-pub fn runList(ctx: Context) !void {
+pub fn runList(ctx: Context, options: nlock.cli.ListOptions) !void {
     const list_message = try nlock.LockRequest
         .init(nlock.LockRequestType.ListLocks, "", false, false, null, "")
         .toJson(ctx.allocator);
@@ -125,13 +125,31 @@ pub fn runList(ctx: Context) !void {
 
     try nlock.writeLine(ctx.writer, list_message);
 
-    var lock_infos = try readLockInfos(ctx.reader, ctx.allocator);
-    defer {
-        for (lock_infos.items) |*lock_info| lock_info.deinit(ctx.allocator);
-        lock_infos.deinit(ctx.allocator);
-    }
+    // Everything below is short-lived, so free it all at once.
+    var arena_state = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
 
-    try printLockInfoTable(ctx.allocator, lock_infos);
+    const lock_infos = try readLockInfos(ctx.reader, arena);
+    // The daemon walks a hash map, so impose a stable order.
+    std.mem.sort(nlock.LockInfo, lock_infos.items, {}, lockInfoLessThan);
+
+    const output = if (options.json)
+        try formatLockInfoJson(arena, lock_infos.items)
+    else if (options.quiet)
+        try formatLockNames(arena, lock_infos.items)
+    else
+        try formatLockInfoTable(arena, lock_infos.items, options.header, nowSeconds(ctx.io));
+
+    try nlock.printer.print("{s}", .{output});
+}
+
+fn lockInfoLessThan(_: void, a: nlock.LockInfo, b: nlock.LockInfo) bool {
+    return std.mem.lessThan(u8, a.name, b.name);
+}
+
+fn nowSeconds(io: Io) i64 {
+    return Io.Timestamp.now(io, .real).toSeconds();
 }
 
 fn readLockInfos(
@@ -155,59 +173,201 @@ fn readLockInfos(
     return lock_infos;
 }
 
-fn printLockInfoTable(allocator: std.mem.Allocator, lock_infos: std.ArrayList(nlock.LockInfo)) !void {
-    // Resolve each uid to a username up front so the column can be sized.
-    // getpwuid returns static storage, so each name is copied.
-    const users = try allocator.alloc([]const u8, lock_infos.items.len);
-    var users_len: usize = 0;
-    defer {
-        for (users[0..users_len]) |user| allocator.free(user);
-        allocator.free(users);
-    }
-    for (lock_infos.items) |lock_info| {
-        var uid_buf: [16]u8 = undefined;
-        users[users_len] = try allocator.dupe(u8, nlock.peer.userName(&uid_buf, lock_info.uid));
-        users_len += 1;
-    }
+/// Resolves `uid` to a username, or its decimal form if it has no passwd
+/// entry. getpwuid returns static storage, so the name is copied.
+fn userNameAlloc(allocator: std.mem.Allocator, uid: u32) ![]const u8 {
+    var uid_buf: [16]u8 = undefined;
+    return allocator.dupe(u8, nlock.peer.userName(&uid_buf, uid));
+}
 
-    var max_name_len: usize = "NAME".len;
-    var max_user_len: usize = "USER".len;
-    var max_cmd_len: usize = "CMD".len;
-    for (lock_infos.items, users) |lock_info, user| {
-        max_name_len = @max(max_name_len, lock_info.name.len);
-        max_user_len = @max(max_user_len, user.len);
-        max_cmd_len = @max(max_cmd_len, lock_info.command.len);
-    }
-
-    const row_fmt = "| {[name]s:<[name_width]} | {[user]s:<[user_width]} | {[global]s:<[global_width]} | {[cmd]s:<[cmd_width]} |\n";
-
-    nlock.printer.print(row_fmt, .{
-        .name = "NAME",
-        .name_width = max_name_len,
-        .user = "USER",
-        .user_width = max_user_len,
-        .global = "GLOBAL",
-        .global_width = 8,
-        .cmd = "CMD",
-        .cmd_width = max_cmd_len,
-    }) catch |err| {
-        log(ll.Error, "Failed to print lock list header: {s}", .{@errorName(err)});
-    };
-
-    for (lock_infos.items, users) |lock_info, user| {
-        nlock.printer.print(row_fmt, .{
+/// `nlock list --json`: one JSON object per lock, one per line. Unlike the
+/// table, this round-trips arbitrary names and commands exactly.
+fn formatLockInfoJson(allocator: std.mem.Allocator, lock_infos: []const nlock.LockInfo) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (lock_infos) |lock_info| {
+        const json = try std.json.Stringify.valueAlloc(allocator, .{
             .name = lock_info.name,
-            .name_width = max_name_len,
-            .user = user,
-            .user_width = max_user_len,
-            .global = if (lock_info.global) "true" else "false",
-            .global_width = 8,
-            .cmd = lock_info.command,
-            .cmd_width = max_cmd_len,
-        }) catch |err| {
-            log(ll.Error, "Failed to print lock info: {s}", .{@errorName(err)});
-        };
+            .user = try userNameAlloc(allocator, lock_info.uid),
+            .uid = lock_info.uid,
+            .pid = lock_info.pid,
+            .global = lock_info.global,
+            .waiters = lock_info.waiters,
+            .acquired_at = lock_info.acquired_at,
+            .command = lock_info.command,
+        }, .{ .whitespace = .minified });
+        try out.appendSlice(allocator, json);
+        try out.append(allocator, '\n');
     }
+    return out.items;
+}
+
+/// `nlock list --quiet`: lock names only, one per line.
+fn formatLockNames(allocator: std.mem.Allocator, lock_infos: []const nlock.LockInfo) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (lock_infos) |lock_info| {
+        try appendEscaped(allocator, &out, lock_info.name);
+        try out.append(allocator, '\n');
+    }
+    return out.items;
+}
+
+const Column = struct {
+    title: []const u8,
+    align_right: bool = false,
+};
+
+/// CMD is last because it is the only column that may contain spaces, so
+/// every other column can be split on whitespace.
+const columns = [_]Column{
+    .{ .title = "NAME" },
+    .{ .title = "USER" },
+    .{ .title = "PID", .align_right = true },
+    .{ .title = "SCOPE" },
+    .{ .title = "ELAPSED", .align_right = true },
+    .{ .title = "WAITERS", .align_right = true },
+    .{ .title = "CMD" },
+};
+
+const column_separator = "  ";
+
+/// Default `nlock list` output: whitespace-aligned columns with an optional
+/// header row, in the style of `ps`.
+fn formatLockInfoTable(
+    allocator: std.mem.Allocator,
+    lock_infos: []const nlock.LockInfo,
+    header: bool,
+    now: i64,
+) ![]const u8 {
+    const Row = [columns.len][]const u8;
+
+    var rows: std.ArrayList(Row) = .empty;
+    if (header) {
+        var row: Row = undefined;
+        for (columns, &row) |column, *cell| cell.* = column.title;
+        try rows.append(allocator, row);
+    }
+    for (lock_infos) |lock_info| {
+        var name: std.ArrayList(u8) = .empty;
+        try appendEscaped(allocator, &name, lock_info.name);
+        var command: std.ArrayList(u8) = .empty;
+        try appendEscaped(allocator, &command, lock_info.command);
+
+        try rows.append(allocator, .{
+            name.items,
+            try userNameAlloc(allocator, lock_info.uid),
+            if (lock_info.pid > 0) try std.fmt.allocPrint(allocator, "{d}", .{lock_info.pid}) else "-",
+            if (lock_info.global) "global" else "user",
+            try formatElapsed(allocator, now - lock_info.acquired_at),
+            try std.fmt.allocPrint(allocator, "{d}", .{lock_info.waiters}),
+            command.items,
+        });
+    }
+
+    var widths = [_]usize{0} ** columns.len;
+    for (rows.items) |row| {
+        for (row, &widths) |cell, *width| width.* = @max(width.*, cell.len);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    for (rows.items) |row| {
+        for (columns, row, widths, 0..) |column, cell, width, i| {
+            const last = i == columns.len - 1;
+            if (last) {
+                // No padding, so lines never end in whitespace.
+                try out.appendSlice(allocator, cell);
+                try out.append(allocator, '\n');
+            } else if (column.align_right) {
+                try out.appendNTimes(allocator, ' ', width - cell.len);
+                try out.appendSlice(allocator, cell);
+                try out.appendSlice(allocator, column_separator);
+            } else {
+                try out.appendSlice(allocator, cell);
+                try out.appendNTimes(allocator, ' ', width - cell.len);
+                try out.appendSlice(allocator, column_separator);
+            }
+        }
+    }
+    return out.items;
+}
+
+/// Formats a duration like `ps -o etime`: `[[dd-]hh:]mm:ss`.
+fn formatElapsed(allocator: std.mem.Allocator, seconds: i64) ![]const u8 {
+    // Clamp in case the daemon's clock and ours disagree.
+    const total: u64 = @intCast(@max(seconds, 0));
+    const days = total / std.time.s_per_day;
+    const hours = total / std.time.s_per_hour % 24;
+    const minutes = total / std.time.s_per_min % 60;
+    const secs = total % 60;
+    if (days > 0) {
+        return std.fmt.allocPrint(allocator, "{d}-{d:0>2}:{d:0>2}:{d:0>2}", .{ days, hours, minutes, secs });
+    } else if (hours > 0) {
+        return std.fmt.allocPrint(allocator, "{d:0>2}:{d:0>2}:{d:0>2}", .{ hours, minutes, secs });
+    }
+    return std.fmt.allocPrint(allocator, "{d:0>2}:{d:0>2}", .{ minutes, secs });
+}
+
+/// Appends `s` with control characters escaped (`\n`, `\t`, `\r`, `\xNN`)
+/// so that each lock always occupies exactly one line.
+fn appendEscaped(allocator: std.mem.Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    for (s) |ch| switch (ch) {
+        '\n' => try out.appendSlice(allocator, "\\n"),
+        '\t' => try out.appendSlice(allocator, "\\t"),
+        '\r' => try out.appendSlice(allocator, "\\r"),
+        0...8, 11, 12, 14...31, 127 => try out.print(allocator, "\\x{x:0>2}", .{ch}),
+        else => try out.append(allocator, ch),
+    };
+}
+
+test "formatElapsed" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqualStrings("00:00", try formatElapsed(arena, -5));
+    try std.testing.expectEqualStrings("00:07", try formatElapsed(arena, 7));
+    try std.testing.expectEqualStrings("02:05", try formatElapsed(arena, 125));
+    try std.testing.expectEqualStrings("01:00:00", try formatElapsed(arena, 3600));
+    try std.testing.expectEqualStrings("3-04:05:06", try formatElapsed(arena, 3 * 86400 + 4 * 3600 + 5 * 60 + 6));
+}
+
+test "appendEscaped keeps output on one line" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+    try appendEscaped(std.testing.allocator, &out, "echo a\tb\nc\x1b d\\e");
+    try std.testing.expectEqualStrings("echo a\\tb\\nc\\x1b d\\e", out.items);
+}
+
+test "formatLockInfoTable aligns columns and leaves CMD last and unpadded" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const lock_infos = [_]nlock.LockInfo{
+        .{ .name = "build", .uid = 4000000000, .pid = 123, .global = false, .waiters = 0, .acquired_at = 1000, .command = "make -j8" },
+        .{ .name = "deploy-prod", .uid = 4000000001, .pid = 0, .global = true, .waiters = 12, .acquired_at = 0, .command = "sh -c 'a\nb'" },
+    };
+    const table = try formatLockInfoTable(arena, &lock_infos, true, 1065);
+    try std.testing.expectEqualStrings(
+        \\NAME         USER        PID  SCOPE   ELAPSED  WAITERS  CMD
+        \\build        4000000000  123  user      01:05        0  make -j8
+        \\deploy-prod  4000000001    -  global    17:45       12  sh -c 'a\nb'
+        \\
+    , table);
+
+    const no_header = try formatLockInfoTable(arena, lock_infos[0..1], false, 1065);
+    try std.testing.expectEqualStrings("build  4000000000  123  user  01:05  0  make -j8\n", no_header);
+}
+
+test "formatLockInfoTable prints only the header when no locks are held" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqualStrings(
+        "NAME  USER  PID  SCOPE  ELAPSED  WAITERS  CMD\n",
+        try formatLockInfoTable(arena, &.{}, true, 0),
+    );
+    try std.testing.expectEqualStrings("", try formatLockInfoTable(arena, &.{}, false, 0));
 }
 
 pub fn acquireLock(

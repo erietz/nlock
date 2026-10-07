@@ -2,13 +2,13 @@ const std = @import("std");
 
 pub const USAGE =
     \\Usage: nlock run <name> [--global] -- <command> [args...]
-    \\       nlock list
+    \\       nlock list [--json | -q] [-H]
     \\
 ;
 
 pub const Command = union(enum) {
     run: RunOptions,
-    list,
+    list: ListOptions,
 
     pub fn parseArgs(args: []const [:0]const u8) !Command {
         if (args.len < 2) {
@@ -21,15 +21,52 @@ pub const Command = union(enum) {
         if (std.mem.eql(u8, subcommand, "run")) {
             return .{ .run = try RunOptions.parseArgs(rest) };
         } else if (std.mem.eql(u8, subcommand, "list")) {
-            if (rest.len != 0) {
-                return error.InvalidArguments; // list takes no arguments
-            }
-            return .list;
+            return .{ .list = try ListOptions.parseArgs(rest) };
         }
 
         return error.InvalidArguments; // Unknown subcommand
     }
 };
+
+pub const ListOptions = struct {
+    /// Print one JSON object per lock, one per line.
+    json: bool = false,
+    /// Print only lock names, one per line.
+    quiet: bool = false,
+    /// Print the column header row in the default table output.
+    header: bool = true,
+
+    /// Parses the arguments following `list`: `[--json | -q] [-H]`
+    pub fn parseArgs(args: []const [:0]const u8) !ListOptions {
+        var options = ListOptions{};
+        for (args) |arg| {
+            if (std.mem.eql(u8, arg, "--json")) {
+                options.json = true;
+            } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q")) {
+                options.quiet = true;
+            } else if (std.mem.eql(u8, arg, "--no-header") or std.mem.eql(u8, arg, "-H")) {
+                options.header = false;
+            } else {
+                return error.InvalidArguments; // Unknown option or stray argument
+            }
+        }
+        if (options.json and options.quiet) {
+            return error.InvalidArguments; // Conflicting output formats
+        }
+        return options;
+    }
+};
+
+/// Returns true if `name` can be used as a lock name. Whitespace and control
+/// characters are rejected so names stay a single field in `nlock list`
+/// output.
+pub fn isValidLockName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |ch| {
+        if (std.ascii.isWhitespace(ch) or std.ascii.isControl(ch)) return false;
+    }
+    return true;
+}
 
 pub const RunOptions = struct {
     name: []const u8,
@@ -87,8 +124,8 @@ pub const RunOptions = struct {
             }
         }
 
-        if (options.name.len == 0) {
-            return error.InvalidArguments; // No name provided
+        if (!isValidLockName(options.name)) {
+            return error.InvalidArguments; // No name, or name has whitespace or control characters
         }
 
         return options;
@@ -122,7 +159,30 @@ test "Command.parseArgs without subcommand" {
 test "Command.parseArgs list" {
     const args: []const [:0]const u8 = &.{ "nlock", "list" };
     const result = try Command.parseArgs(args);
-    try std.testing.expect(result == .list);
+    try std.testing.expectEqual(ListOptions{}, result.list);
+}
+
+test "Command.parseArgs list with output options" {
+    const args: []const [:0]const u8 = &.{ "nlock", "list", "--json", "-H" };
+    const result = try Command.parseArgs(args);
+    try std.testing.expectEqual(ListOptions{ .json = true, .header = false }, result.list);
+}
+
+test "ListOptions.parseArgs long and short flags" {
+    const short: []const [:0]const u8 = &.{ "-q", "-H" };
+    try std.testing.expectEqual(ListOptions{ .quiet = true, .header = false }, try ListOptions.parseArgs(short));
+    const long: []const [:0]const u8 = &.{ "--quiet", "--no-header" };
+    try std.testing.expectEqual(ListOptions{ .quiet = true, .header = false }, try ListOptions.parseArgs(long));
+}
+
+test "ListOptions.parseArgs rejects --json with --quiet" {
+    const args: []const [:0]const u8 = &.{ "--json", "-q" };
+    try std.testing.expectError(error.InvalidArguments, ListOptions.parseArgs(args));
+}
+
+test "ListOptions.parseArgs rejects unknown options" {
+    const args: []const [:0]const u8 = &.{"--wide"};
+    try std.testing.expectError(error.InvalidArguments, ListOptions.parseArgs(args));
 }
 
 test "Command.parseArgs list with extra arguments" {
@@ -253,4 +313,23 @@ test "RunOptions.parseArgs with only name" {
     const args: []const [:0]const u8 = &.{"mylock"};
     const result = RunOptions.parseArgs(args);
     try std.testing.expectError(error.InvalidArguments, result);
+}
+
+test "RunOptions.parseArgs rejects names with whitespace" {
+    const args: []const [:0]const u8 = &.{ "my lock", "--", "echo", "Hello" };
+    try std.testing.expectError(error.InvalidArguments, RunOptions.parseArgs(args));
+}
+
+test "RunOptions.parseArgs rejects names with control characters" {
+    const args: []const [:0]const u8 = &.{ "my\x1block", "--", "echo", "Hello" };
+    try std.testing.expectError(error.InvalidArguments, RunOptions.parseArgs(args));
+}
+
+test "isValidLockName" {
+    try std.testing.expect(isValidLockName("build"));
+    try std.testing.expect(isValidLockName("db-migrate.v2/prod"));
+    try std.testing.expect(!isValidLockName(""));
+    try std.testing.expect(!isValidLockName("a b"));
+    try std.testing.expect(!isValidLockName("a\tb"));
+    try std.testing.expect(!isValidLockName("a\nb"));
 }

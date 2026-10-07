@@ -6,6 +6,7 @@ pub const Waiter = struct {
     node: std.DoublyLinkedList.Node = .{},
     command: []const u8,
     uid: u32,
+    pid: i32 = 0,
     global: bool,
 };
 
@@ -13,7 +14,12 @@ pub const Lock = struct {
     waiters: std.DoublyLinkedList = .{},
     command: []const u8,
     uid: u32,
+    /// Pid of the `nlock` client holding the lock.
+    pid: i32 = 0,
     global: bool,
+    /// When the current holder acquired the lock, in seconds since the Unix
+    /// epoch.
+    acquired_at: i64 = 0,
 };
 
 test "Lock and Waiter structures" {
