@@ -7,7 +7,7 @@ const ll = nlock.logger.LogLevel;
 const Context = struct {
     io: Io,
     allocator: std.mem.Allocator,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    map: *nlock.ThreadSafeHashMap([]const u8, *nlock.Lock),
     writer: *Io.Writer,
 };
 
@@ -35,7 +35,7 @@ pub fn runServer(init: std.process.Init) !void {
     defer server.deinit(io);
     log(ll.Info, "Server started and listening on {s}", .{socket_path});
 
-    var map = nlock.ThreadSafeHashMap([]const u8, nlock.Lock).init(io, gpa);
+    var map = nlock.ThreadSafeHashMap([]const u8, *nlock.Lock).init(io, gpa);
     // Declared before `group` so this runs after `group.cancel`: no connection
     // tasks remain, so it is safe to walk the inner map without the mutex.
     defer {
@@ -43,6 +43,7 @@ pub fn runServer(init: std.process.Init) !void {
         while (it.next()) |entry| {
             gpa.free(entry.key_ptr.*);
             gpa.free(entry.value_ptr.*.command);
+            gpa.destroy(entry.value_ptr.*);
         }
         map.deinit();
     }
@@ -72,7 +73,7 @@ fn connectionTask(
     io: Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    map: *nlock.ThreadSafeHashMap([]const u8, *nlock.Lock),
 ) Io.Cancelable!void {
     handleConnection(
         io,
@@ -84,11 +85,16 @@ fn connectionTask(
     };
 }
 
+const AcquireResult = enum {
+    acquired,
+    not_acquired,
+};
+
 fn handleConnection(
     io: Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    map: *nlock.ThreadSafeHashMap([]const u8, *nlock.Lock),
 ) !void {
     defer stream.close(io);
     var read_buffer: [1024]u8 = undefined;
@@ -102,18 +108,17 @@ fn handleConnection(
         .writer = &writer.interface,
     };
 
-    // Client current follows this simple ACQUIRE -> EXECUTE -> RELEASE
-    // pattern, but this will change when implementing the `list` command, for
-    // example.
-
     var req = try readRequest(&reader.interface, allocator);
     defer req.deinit(allocator);
     switch (req.request_type) {
         nlock.LockRequestType.AcquireLock => {
-            handleAcquireLockRequest(ctx, req) catch |err| {
+            const result = handleAcquireLockRequest(ctx, req) catch |err| {
                 log(ll.Error, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
                 return err;
             };
+            if (result != .acquired) {
+                return;
+            }
         },
         nlock.LockRequestType.ListLocks => {
             return handleListLocksRequest(ctx) catch |err| {
@@ -129,7 +134,13 @@ fn handleConnection(
 
     // The client executes the command and then sends a release lock request
     log(ll.Debug, "Waiting for release lock request from client", .{});
-    var release_req = try readRequest(&reader.interface, allocator);
+    var release_req = readRequest(&reader.interface, allocator) catch |err| {
+        log(ll.Debug, "Failed to read release request (client may have disconnected): {s}", .{@errorName(err)});
+        handleReleaseLockRequest(ctx, req) catch |release_err| {
+            log(ll.Error, "Failed to auto-release lock on client disconnect: {s}", .{@errorName(release_err)});
+        };
+        return err;
+    };
     defer release_req.deinit(allocator);
     switch (release_req.request_type) {
         nlock.LockRequestType.ReleaseLock => {
@@ -188,90 +199,93 @@ fn sendLockResponse(
 fn handleAcquireLockRequest(
     ctx: Context,
     lock_request: nlock.LockRequest,
-) !void {
-    // Check and insert in one atomic step so two clients racing for the same
-    // name cannot both acquire it.
-    const lock_name_copy = try ctx.allocator.dupe(u8, lock_request.name);
-    const command_copy = try ctx.allocator.dupe(u8, lock_request.command);
-    errdefer {
-        ctx.allocator.free(lock_name_copy);
-        ctx.allocator.free(command_copy);
-    }
-    const lock = nlock.Lock{
-        .command = command_copy,
-    };
-
-    const acquired = try ctx.map.tryPut(lock_name_copy, lock);
-    if (acquired) {
-        log(ll.Info, "Acquired lock for name '{s}' (global: {}). Command: {s}", .{
-            lock_request.name,
-            lock_request.global,
-            lock_request.command,
-        });
-    } else {
-        log(ll.Info, "Lock for name '{s}' is already acquired. Waiting for release.", .{lock_request.name});
-        try handleLockBlocking(ctx, lock_request);
-    }
-
-    log(ll.Info, "Sending acquired response for lock {s}.", .{lock_name_copy});
-    try sendLockResponse(ctx, nlock.LockResponseStatus.Ok);
-}
-
-fn handleLockBlocking(ctx: Context, lock_request: nlock.LockRequest) !void {
-    // TODO: almost feel like we need manual control of the mutex from
-    // above, so that we can do a get and then a put in the same section.
-    // There is still a race condition here.
-    var existing_lock = ctx.map.getPtr(lock_request.name) orelse {
-        log(ll.Error, "Lock for name '{s}' was removed before we could add a waiter", .{lock_request.name});
-        return error.LockAlreadyAcquired;
-    };
-
-    if (lock_request.nonblock) {
-        try sendLockResponse(ctx, nlock.LockResponseStatus.Busy);
-        return;
-    }
-
+) !AcquireResult {
     var waiter = nlock.Waiter{
         .command = lock_request.command,
     };
-    // Queue up the command to be executed when the acquired lock is
-    // released
-    existing_lock.waiters.append(&waiter.node);
+    var is_waiting = false;
 
-    if (lock_request.timeout) |timeout_s| {
-        log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{
-            lock_request.name,
-            timeout_s,
-        });
-        // TODO: This is not a safe type cast. We should use a safe cast or
-        // check the value before casting.
-        const timeout = std.Io.Timeout{ .duration = .{
-            .clock = .awake,
-            .raw = std.Io.Duration.fromSeconds(@intCast(timeout_s)),
-        } };
+    {
+        ctx.map.mutex.lockUncancelable(ctx.io);
+        defer ctx.map.mutex.unlock(ctx.io);
 
-        // Wait for the lock to be released. This does not happen until the
-        // client sends a release lock request, which will signal this
-        // waiter. Or if the timeout expires, we will return a timeout
-        // error to the client.
-        waiter.event.waitTimeout(ctx.io, timeout) catch |err| switch (err) {
-            error.Timeout => {
-                log(ll.Info, "Timeout while waiting for lock '{s}' to be released", .{
-                    lock_request.name,
-                });
-                // Remove the waiter from the queue since it timed out
-                existing_lock.waiters.remove(&waiter.node);
-                try sendLockResponse(ctx, nlock.LockResponseStatus.Timeout);
-                return error.Timeout;
-            },
-            else => return err,
-        };
-    } else {
-        // Wait for the lock to be released. This does not happen until the
-        // client sends a release lock request, which will signal this waiter.
-        log(ll.Debug, "Waiting for lock '{s}' to be released without timeout", .{lock_request.name});
-        try waiter.event.wait(ctx.io);
+        if (ctx.map.map.get(lock_request.name)) |existing_lock| {
+            if (lock_request.nonblock) {
+                log(ll.Info, "Lock for name '{s}' is already acquired (non-blocking).", .{lock_request.name});
+                try sendLockResponse(ctx, nlock.LockResponseStatus.Busy);
+                return .not_acquired;
+            }
+            log(ll.Info, "Lock for name '{s}' is already acquired. Waiting for release.", .{lock_request.name});
+            existing_lock.waiters.append(&waiter.node);
+            is_waiting = true;
+        } else {
+            const key = try ctx.allocator.dupe(u8, lock_request.name);
+            errdefer ctx.allocator.free(key);
+            const cmd = try ctx.allocator.dupe(u8, lock_request.command);
+            errdefer ctx.allocator.free(cmd);
+            const lock = try ctx.allocator.create(nlock.Lock);
+            errdefer ctx.allocator.destroy(lock);
+            lock.* = .{
+                .command = cmd,
+                .waiters = .{},
+            };
+            try ctx.map.map.put(key, lock);
+
+            log(ll.Info, "Acquired lock for name '{s}' (global: {}). Command: {s}", .{
+                lock_request.name,
+                lock_request.global,
+                lock_request.command,
+            });
+            log(ll.Info, "Sending acquired response for lock {s}.", .{lock_request.name});
+            try sendLockResponse(ctx, nlock.LockResponseStatus.Ok);
+            return .acquired;
+        }
     }
+
+    if (is_waiting) {
+        if (lock_request.timeout) |timeout_s| {
+            log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{
+                lock_request.name,
+                timeout_s,
+            });
+            const timeout = std.Io.Timeout{ .duration = .{
+                .clock = .awake,
+                .raw = std.Io.Duration.fromSeconds(@intCast(timeout_s)),
+            } };
+
+            waiter.event.waitTimeout(ctx.io, timeout) catch |err| switch (err) {
+                error.Timeout => {
+                    log(ll.Info, "Timeout while waiting for lock '{s}' to be released", .{
+                        lock_request.name,
+                    });
+                    ctx.map.mutex.lockUncancelable(ctx.io);
+                    defer ctx.map.mutex.unlock(ctx.io);
+
+                    if (waiter.event == .is_set) {
+                        log(ll.Info, "Sending acquired response for lock {s}.", .{lock_request.name});
+                        try sendLockResponse(ctx, nlock.LockResponseStatus.Ok);
+                        return .acquired;
+                    } else {
+                        if (ctx.map.map.get(lock_request.name)) |existing_lock| {
+                            existing_lock.waiters.remove(&waiter.node);
+                        }
+                        try sendLockResponse(ctx, nlock.LockResponseStatus.Timeout);
+                        return .not_acquired;
+                    }
+                },
+                else => return err,
+            };
+        } else {
+            log(ll.Debug, "Waiting for lock '{s}' to be released without timeout", .{lock_request.name});
+            try waiter.event.wait(ctx.io);
+        }
+
+        log(ll.Info, "Sending acquired response for lock {s}.", .{lock_request.name});
+        try sendLockResponse(ctx, nlock.LockResponseStatus.Ok);
+        return .acquired;
+    }
+
+    return .not_acquired;
 }
 
 fn handleReleaseLockRequest(
@@ -283,21 +297,24 @@ fn handleReleaseLockRequest(
         lock_request.global,
     });
 
-    if (ctx.map.getPtr(lock_request.name)) |lock_ptr| {
+    ctx.map.mutex.lockUncancelable(ctx.io);
+    defer ctx.map.mutex.unlock(ctx.io);
+
+    if (ctx.map.map.get(lock_request.name)) |lock_ptr| {
         if (lock_ptr.waiters.popFirst()) |waiter_node| {
-            var waiter: *nlock.Waiter = @fieldParentPtr("node", waiter_node);
-            lock_ptr.command = waiter.command; // Update the lock's command to the waiter's command
+            const waiter: *nlock.Waiter = @fieldParentPtr("node", waiter_node);
+            const new_cmd = try ctx.allocator.dupe(u8, waiter.command);
+            ctx.allocator.free(lock_ptr.command);
+            lock_ptr.command = new_cmd;
+
             // Signal the waiter that the lock has been released
             waiter.event.set(ctx.io);
-            ctx.allocator.free(waiter.command); // Free the waiter's command after signaling
         } else {
-            // const keyPtr = ctx.map.getKeyPtr(lock_request.name) orelse {
-            //     log(ll.Error, "Lock for name '{s}' was removed before we could free its command", .{lock_request.name});
-            //     return error.LockNotFound;
-            // };
-            // ctx.allocator.free(keyPtr.*);
-            // ctx.allocator.free(lock_ptr.command);
-            _ = ctx.map.remove(lock_request.name);
+            if (ctx.map.map.fetchRemove(lock_request.name)) |kv| {
+                ctx.allocator.free(kv.key);
+                ctx.allocator.free(kv.value.command);
+                ctx.allocator.destroy(kv.value);
+            }
         }
 
         log(ll.Info, "Lock for name '{s}' released successfully.", .{lock_request.name});
@@ -312,6 +329,9 @@ fn handleReleaseLockRequest(
 fn handleListLocksRequest(
     ctx: Context,
 ) !void {
+    ctx.map.mutex.lockUncancelable(ctx.io);
+    defer ctx.map.mutex.unlock(ctx.io);
+
     var it = ctx.map.map.iterator();
     while (it.next()) |entry| {
         const lock_name = entry.key_ptr.*;

@@ -79,6 +79,76 @@ test "second client waits until the held lock is released" {
     try expectFileContents(gpa, io, daemon.tmp.dir, "log", "a-start\na-end\nb\n");
 }
 
+test "multiple clients queue for lock and non-blocking client returns busy" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const log_path = try daemon.tmpPath(gpa, "log_multi");
+    defer gpa.free(log_path);
+    const go1_path = try daemon.tmpPath(gpa, "go1");
+    defer gpa.free(go1_path);
+    const go2_path = try daemon.tmpPath(gpa, "go2");
+    defer gpa.free(go2_path);
+
+    // Client 1 holds lock until go1 exists
+    const script_1 = try std.fmt.allocPrint(
+        gpa,
+        "echo c1-start >> {0s}; while [ ! -f {1s} ]; do sleep 0.01; done; echo c1-end >> {0s}",
+        .{ log_path, go1_path },
+    );
+    defer gpa.free(script_1);
+    var client_1 = try daemon.spawnClient(gpa, io, &.{ "run", "multilock", "--", "sh", "-c", script_1 });
+    var c1_done = false;
+    defer if (!c1_done) client_1.kill(io);
+
+    try waitForFileContents(gpa, io, daemon.tmp.dir, "log_multi", "c1-start\n");
+
+    // Client 2 queues behind Client 1
+    const script_2 = try std.fmt.allocPrint(
+        gpa,
+        "echo c2-start >> {0s}; while [ ! -f {1s} ]; do sleep 0.01; done; echo c2-end >> {0s}",
+        .{ log_path, go2_path },
+    );
+    defer gpa.free(script_2);
+    var client_2 = try daemon.spawnClient(gpa, io, &.{ "run", "multilock", "--", "sh", "-c", script_2 });
+    var c2_done = false;
+    defer if (!c2_done) client_2.kill(io);
+
+    // Client 3 queues behind Client 2
+    const script_3 = try std.fmt.allocPrint(gpa, "echo c3 >> {s}", .{log_path});
+    defer gpa.free(script_3);
+    var client_3 = try daemon.spawnClient(gpa, io, &.{ "run", "multilock", "--", "sh", "-c", script_3 });
+    var c3_done = false;
+    defer if (!c3_done) client_3.kill(io);
+
+    // Client 4 tries non-blocking acquire and should fail immediately
+    try io.sleep(.fromMilliseconds(100), .awake);
+    const nonblock_result = try daemon.client(gpa, io, &.{ "run", "multilock", "--nonblock", "--", "true" });
+    defer gpa.free(nonblock_result.stdout);
+    defer gpa.free(nonblock_result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 1 }, nonblock_result.term);
+
+    // Release Client 1
+    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go1", .data = "" });
+    c1_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_1.wait(io));
+
+    // Release Client 2
+    try waitForFileContents(gpa, io, daemon.tmp.dir, "log_multi", "c1-start\nc1-end\nc2-start\n");
+    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go2", .data = "" });
+    c2_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_2.wait(io));
+
+    // Wait for Client 3
+    c3_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_3.wait(io));
+
+    try expectFileContents(gpa, io, daemon.tmp.dir, "log_multi", "c1-start\nc1-end\nc2-start\nc2-end\nc3\n");
+}
+
 test "list succeeds with no locks held" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
