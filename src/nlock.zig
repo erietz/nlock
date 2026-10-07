@@ -1,12 +1,17 @@
 // TODO: Need to handle ctrl-c and other signals to release the lock properly
-// TODO: Current implementation is non-blocking, but blocking should be the default
-//       and non-blocking should be put behind -n or --non-blocking flag
 
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
 const log = nlock.logger.log;
 const ll = nlock.logger.LogLevel;
+
+const Context = struct {
+    io: Io,
+    reader: *Io.Reader,
+    writer: *Io.Writer,
+    allocator: std.mem.Allocator,
+};
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
@@ -20,6 +25,12 @@ pub fn main(init: std.process.Init) void {
             error.LockServerNotRunning => {
                 std.debug.print("Lock server is not running. Please start the lock server first.\n", .{});
             },
+            error.LockAcquireTimeout => {
+                std.debug.print("Failed to acquire lock within the specified timeout.\n", .{});
+            },
+            error.LockReleaseFailed => {
+                std.debug.print("Failed to release lock. Please check the lock server logs for more details.\n", .{});
+            },
             else => {
                 std.debug.print("An unexpected error occurred: {s}\n", .{@errorName(err)});
             },
@@ -29,16 +40,13 @@ pub fn main(init: std.process.Init) void {
 }
 
 pub fn run(init: std.process.Init) !void {
+    const args = try init.minimal.args.toSlice(init.gpa);
+    defer init.gpa.free(args);
+    const command = try nlock.cli.Command.parseArgs(args);
+
     nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
     nlock.printer.init(init.io);
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-    switch (try nlock.cli.Command.parseArgs(args)) {
-        .run => |options| try runLocked(init, options),
-        .list => try runList(init),
-    }
-}
 
-pub fn runLocked(init: std.process.Init, options: nlock.cli.RunOptions) !void {
     const address = try std.Io.net.UnixAddress.init(nlock.getSocketPath(init.environ_map));
     const stream = address.connect(init.io) catch |err| {
         log(ll.Error, "Failed to connect to lock server: {s}", .{@errorName(err)});
@@ -52,64 +60,75 @@ pub fn runLocked(init: std.process.Init, options: nlock.cli.RunOptions) !void {
     var read_buffer: [1024]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
 
-    const acquireStatus = try acquireLock(
-        init.arena.allocator(),
-        &writer.interface,
-        &reader.interface,
-        options,
-    );
+    const ctx = Context{
+        .io = init.io,
+        .reader = &reader.interface,
+        .writer = &writer.interface,
+        .allocator = init.gpa,
+    };
 
-    if (acquireStatus == nlock.LockResponseStatus.Ok) {
-        log(ll.Debug, "Lock acquired successfully. Running command", .{});
-        runCommand(init.io, options.command) catch |err| {
-            // Even if the command fails, we should still attempt to release
-            // the lock so no return error here, just log the error
-            std.debug.print("Failed to run command: {s}\n", .{@errorName(err)});
-        };
-
-        log(ll.Debug, "Command finished. Releasing lock: {s}", .{options.name});
-        const releaseStatus = try releaseLock(
-            init.arena.allocator(),
-            &writer.interface,
-            &reader.interface,
-            options,
-        );
-
-        if (releaseStatus != nlock.LockResponseStatus.Ok) {
-            std.debug.print("Failed to release lock. Status: {d}\n", .{releaseStatus});
-            return error.LockReleaseFailed;
-        }
-    } else if (acquireStatus == nlock.LockResponseStatus.Busy) {
-        return error.LockAlreadyAcquired;
-    } else {
-        std.debug.print("Received unknown lock response status.\n", .{});
-        return error.UnknownLockResponse;
+    switch (command) {
+        .run => |options| try runLocked(ctx, options),
+        .list => try runList(ctx),
     }
 }
 
-pub fn runList(init: std.process.Init) !void {
-    const address = try std.Io.net.UnixAddress.init(nlock.getSocketPath(init.environ_map));
-    const stream = try address.connect(init.io);
-    defer stream.close(init.io);
+pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !void {
+    const acquire_status = try acquireLock(
+        ctx.allocator,
+        ctx.writer,
+        ctx.reader,
+        options,
+    );
 
-    var write_buffer: [1024]u8 = undefined;
-    var writer = stream.writer(init.io, &write_buffer);
+    switch (acquire_status) {
+        nlock.LockResponseStatus.Ok => {
+            log(ll.Debug, "Lock acquired successfully. Running command", .{});
+            runCommand(ctx.io, options.command) catch |err| {
+                // Even if the command fails, we should still attempt to release
+                // the lock so no return error here, just log the error
+                std.debug.print("Failed to run command: {s}\n", .{@errorName(err)});
+            };
+            log(ll.Debug, "Command finished. Releasing lock: {s}", .{options.name});
 
-    var read_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(init.io, &read_buffer);
+            const release_status = try releaseLock(
+                ctx.allocator,
+                ctx.writer,
+                ctx.reader,
+                options,
+            );
 
-    const allocator = init.gpa;
+            switch (release_status) {
+                nlock.LockResponseStatus.Ok => {
+                    log(ll.Debug, "Lock released successfully", .{});
+                },
+                else => {
+                    log(ll.Error, "Failed to release lock. Status: {d}", .{release_status});
+                    return error.LockReleaseFailed;
+                },
+            }
+        },
+        nlock.LockResponseStatus.Busy => {
+            return error.LockAlreadyAcquired;
+        },
+        nlock.LockResponseStatus.Timeout => {
+            return error.LockAcquireTimeout;
+        },
+    }
+}
+
+pub fn runList(ctx: Context) !void {
     const list_message = try nlock.LockRequest
-        .init(nlock.LockRequestType.ListLocks, "", false, false, "")
-        .toJson(allocator);
-    defer allocator.free(list_message);
+        .init(nlock.LockRequestType.ListLocks, "", false, false, null, "")
+        .toJson(ctx.allocator);
+    defer ctx.allocator.free(list_message);
 
-    try nlock.writeLine(&writer.interface, list_message);
+    try nlock.writeLine(ctx.writer, list_message);
 
-    var lock_requests = try readLockRequests(&reader.interface, allocator);
+    var lock_requests = try readLockRequests(ctx.reader, ctx.allocator);
     defer {
-        for (lock_requests.items) |*lock_request| lock_request.deinit(allocator);
-        lock_requests.deinit(allocator);
+        for (lock_requests.items) |*lock_request| lock_request.deinit(ctx.allocator);
+        lock_requests.deinit(ctx.allocator);
     }
 
     try printLockRequestTable(lock_requests);
@@ -181,7 +200,14 @@ pub fn acquireLock(
     };
     defer allocator.free(command_str);
     const message = try nlock.LockRequest
-        .init(nlock.LockRequestType.AcquireLock, options.name, options.global, options.nonblock, command_str)
+        .init(
+            nlock.LockRequestType.AcquireLock,
+            options.name,
+            options.global,
+            options.nonblock,
+            options.timeout,
+            command_str,
+        )
         .toJson(allocator);
     defer allocator.free(message);
 
@@ -193,6 +219,8 @@ pub fn acquireLock(
     return lock_response.status;
 }
 
+/// Releases the lock with the given name. Returns the status of the release
+/// operation.
 pub fn releaseLock(
     allocator: std.mem.Allocator,
     writer: *Io.Writer,
@@ -205,7 +233,14 @@ pub fn releaseLock(
     };
     defer allocator.free(command_str);
     const release_message = try nlock.LockRequest
-        .init(nlock.LockRequestType.ReleaseLock, options.name, options.global, options.nonblock, command_str)
+        .init(
+            nlock.LockRequestType.ReleaseLock,
+            options.name,
+            options.global,
+            options.nonblock,
+            options.timeout,
+            command_str,
+        )
         .toJson(allocator);
     defer allocator.free(release_message);
 
@@ -247,59 +282,4 @@ pub fn runCommand(io: Io, command: []const []const u8) !void {
             log(ll.Debug, "Process terminated with unknown status.", .{});
         },
     }
-}
-
-pub fn writeToStdout(init: std.process.Init) !void {
-    // In order to do I/O operations need an `Io` instance.
-    const io = init.io;
-
-    // Stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    var stdout_buffer: [1024]u8 = undefined;
-    var stdout_file_writer: Io.File.Writer = .init(.stdout(), io, &stdout_buffer);
-    const stdout_writer = &stdout_file_writer.interface;
-
-    try nlock.printAnotherMessage(stdout_writer);
-
-    try stdout_writer.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "fuzz example" {
-    try std.testing.fuzz({}, testOne, .{});
-}
-
-fn testOne(context: void, smith: *std.testing.Smith) !void {
-    _ = context;
-    // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(gpa);
-    while (!smith.eos()) switch (smith.value(enum { add_data, dup_data })) {
-        .add_data => {
-            const slice = try list.addManyAsSlice(gpa, smith.value(u4));
-            smith.bytes(slice);
-        },
-        .dup_data => {
-            if (list.items.len == 0) continue;
-            if (list.items.len > std.math.maxInt(u32)) return error.SkipZigTest;
-            const len = smith.valueRangeAtMost(u32, 1, @min(32, list.items.len));
-            const off = smith.valueRangeAtMost(u32, 0, @intCast(list.items.len - len));
-            try list.appendSlice(gpa, list.items[off..][0..len]);
-            try std.testing.expectEqualSlices(
-                u8,
-                list.items[off..][0..len],
-                list.items[list.items.len - len ..],
-            );
-        },
-    };
 }

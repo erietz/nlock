@@ -158,13 +158,14 @@ fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !nlock.LockRequ
 }
 
 test "readRequest parses a valid LockRequest where command contains newlines" {
-    const message = "{\"request_type\":\"AcquireLock\",\"name\":\"my_lock\",\"global\":false,\"nonblock\":false,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}\n";
+    const message = "{\"request_type\":\"AcquireLock\",\"name\":\"my_lock\",\"global\":false,\"nonblock\":false,\"timeout\":null,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}\n";
     const allocator = std.testing.allocator;
     const expected_request = nlock.LockRequest.init(
         nlock.LockRequestType.AcquireLock,
         "my_lock",
         false,
         false,
+        null,
         "echo 'Hello, World!'\necho 'This is a test.'\n",
     );
 
@@ -175,6 +176,7 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     try std.testing.expectEqual(expected_request.request_type, request.request_type);
     try std.testing.expectEqualStrings(expected_request.name, request.name);
     try std.testing.expectEqual(expected_request.global, request.global);
+    try std.testing.expectEqual(expected_request.nonblock, request.nonblock);
     try std.testing.expectEqualStrings(expected_request.command, request.command);
 }
 
@@ -238,8 +240,39 @@ fn handleAcquireLockRequest(
         // Queue up the command to be executed when the acquired lock is
         // released
         existing_lock.waiters.append(&waiter.node);
-        // Wait for the lock to be released. This does not happen until the
-        // client sends a release lock request, which will signal this waiter.
+
+        if (lock_request.timeout) |timeout_s| {
+            log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_name_copy, timeout_s });
+            // TODO: This is not a safe type cast. We should use a safe cast or
+            // check the value before casting.
+            const timeout = std.Io.Timeout{ .duration = .{
+                .clock = .awake,
+                .raw = std.Io.Duration.fromSeconds(@intCast(timeout_s)),
+            } };
+
+            // Wait for the lock to be released. This does not happen until the
+            // client sends a release lock request, which will signal this
+            // waiter. Or if the timeout expires, we will return a timeout
+            // error to the client.
+            waiter.event.waitTimeout(io, timeout) catch |err| switch (err) {
+                error.Timeout => {
+                    log(ll.Info, "Timeout while waiting for lock '{s}' to be released", .{lock_name_copy});
+                    // Remove the waiter from the queue since it timed out
+                    existing_lock.waiters.remove(&waiter.node);
+                    const timeout_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Timeout).toJson(allocator);
+                    defer allocator.free(timeout_response);
+                    try nlock.writeLine(writer, timeout_response);
+                    return error.Timeout;
+                },
+                else => return err,
+            };
+        } else {
+            // Wait for the lock to be released. This does not happen until the
+            // client sends a release lock request, which will signal this waiter.
+            log(ll.Debug, "Waiting for lock '{s}' to be released without timeout", .{lock_name_copy});
+            try waiter.event.wait(io);
+        }
+
         log(ll.Debug, "Waiting for lock '{s}' to be released", .{lock_name_copy});
         try waiter.event.wait(io);
     }
@@ -303,6 +336,7 @@ fn handleListLocksRequest(
             lock_name,
             false,
             false,
+            null,
             lock_command,
         ).toJson(allocator);
         defer allocator.free(lock_info);
