@@ -1,0 +1,17 @@
+# systemd user unit for nlockd. The nlockd path is filled in by `zig build`.
+#
+# Enable with:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now nlockd
+
+[Unit]
+Description=nlock lock daemon
+Documentation=man:nlockd(1)
+
+[Service]
+ExecStart=@bindir@/nlockd
+Restart=on-failure
+Environment=NLOCK_LOG_LEVEL=Debug
+
+[Install]
+WantedBy=default.target

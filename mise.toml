@@ -21,4 +21,35 @@ env.NLOCK_LOG_LEVEL = "Debug"
 run = "./tmux_tests.sh"
 
 [tasks."install"]
-run = "zig build install --prefix $HOME/.local"
+vars.PREFIX = "$HOME/.local"
+run = 'zig build install --prefix {{ vars.PREFIX }}'
+
+[tasks."uninstall"]
+vars.PREFIX = "$HOME/.local"
+# run = "zig build uninstall --prefix {{ vars.PREFIX }}" # Broken with a todo reference to GH issue
+run = """
+rm -rf {{ vars.PREFIX }}/bin/nlock
+rm -rf {{ vars.PREFIX }}/bin/nlockd
+rm -rf {{ vars.PREFIX }}/share/nlock
+rm -rf {{ vars.PREFIX }}/share/man/man1/nlock.1
+rm -rf {{ vars.PREFIX }}/share/man/man1/nlockd.1
+"""
+
+[tasks."daemon-macos-user-start"]
+env.PREFIX = "$HOME/.local"
+run = """
+zig build install --prefix "${PREFIX}"
+launchctl bootout gui/$(id -u)/com.github.erietz.nlockd
+cp "${PREFIX}/share/nlock/launchd/com.github.erietz.nlockd.plist" ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.erietz.nlockd.plist
+launchctl print gui/$(id -u)/com.github.erietz.nlockd
+echo "check the logs via tail -f ~/Library/Logs/nlockd.log"
+"""
+
+[tasks."daemon-macos-user-stop"]
+env.PREFIX = "$HOME/.local"
+run = """
+launchctl bootout gui/$(id -u)/com.github.erietz.nlockd
+# rm ~/Library/LaunchAgents/com.github.erietz.nlockd.plist
+# rm ~/Library/Logs/nlockd.log
+"""

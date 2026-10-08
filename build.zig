@@ -129,13 +129,13 @@ pub fn build(b: *std.Build) void {
         // $prefix/share/systemd/user is on systemd's user unit search path for
         // /usr, /usr/local and ~/.local alike.
         .linux => {
-            const unit = service_files.add("nlockd.service", fillBindir(b, @embedFile("contrib/systemd/nlockd.service.in"), service_bindir));
+            const unit = service_files.add("nlockd.service", fillTemplate(b, @embedFile("contrib/systemd/nlockd.service.in"), "@bindir@", service_bindir));
             b.getInstallStep().dependOn(&b.addInstallFileWithDir(unit, .prefix, "share/systemd/user/nlockd.service").step);
         },
         // Agents must live in ~/Library/LaunchAgents, which is outside the
         // prefix, so install the plist for the user to copy there.
         .macos => {
-            const plist = service_files.add("com.github.erietz.nlockd.plist", fillBindir(b, @embedFile("contrib/launchd/com.github.erietz.nlockd.plist.in"), service_bindir));
+            const plist = service_files.add("com.github.erietz.nlockd.plist", fillTemplate(b, @embedFile("contrib/launchd/com.github.erietz.nlockd.plist.in"), "@bindir@", service_bindir));
             b.getInstallStep().dependOn(&b.addInstallFileWithDir(plist, .prefix, "share/nlock/launchd/com.github.erietz.nlockd.plist").step);
         },
         else => {},
@@ -246,7 +246,7 @@ pub fn build(b: *std.Build) void {
     // and reading its source code will allow you to master it.
 }
 
-/// Replaces `@bindir@` in a service file template.
-fn fillBindir(b: *std.Build, template: []const u8, bindir: []const u8) []const u8 {
-    return std.mem.replaceOwned(u8, b.allocator, template, "@bindir@", bindir) catch @panic("OOM");
+/// Replaces a placeholder such as `@bindir@` in a service file template.
+fn fillTemplate(b: *std.Build, template: []const u8, placeholder: []const u8, value: []const u8) []const u8 {
+    return std.mem.replaceOwned(u8, b.allocator, template, placeholder, value) catch @panic("OOM");
 }

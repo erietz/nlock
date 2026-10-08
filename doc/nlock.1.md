@@ -118,9 +118,10 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
 # NLOCKD
 
-**nlockd** runs in the foreground, takes no arguments and logs to standard
-error, so it is meant to be started by a service manager (see **RUNNING
-NLOCKD AS A SERVICE**) or directly in a terminal. Each user runs their own
+**nlockd** runs in the foreground and takes no arguments, so it is meant to
+be started by a service manager (see **RUNNING NLOCKD AS A SERVICE**) or
+directly in a terminal. Where its messages go depends on which (see
+**LOGGING**). Each user runs their own
 **nlockd**, and **nlock** only talks to a daemon owned by the same user or by
 root.
 
@@ -146,8 +147,6 @@ with:
     systemctl --user daemon-reload
     systemctl --user enable --now nlockd
 
-Logs are available with **journalctl \-\-user -u nlockd**.
-
 On macOS, a launchd agent is installed as
 *PREFIX*/share/nlock/launchd/com.github.erietz.nlockd.plist. Copy it to
 *~/Library/LaunchAgents* and load it with:
@@ -159,6 +158,29 @@ and unload it with:
     launchctl bootout gui/$(id -u)/com.github.erietz.nlockd
 
 When installed with Homebrew, use **brew services start nlock** instead.
+
+Both service definitions set **NLOCK_LOG_LEVEL**=**Debug**.
+
+# LOGGING
+
+When its standard error is a terminal, **nlockd** logs there, as **nlock**
+does. Otherwise, as when it runs under systemd or launchd, it logs to
+**syslog**(3) with the identifier **nlockd**, mapping each message's level to
+the matching syslog priority. View the messages with:
+
+    journalctl --user -u nlockd -f                              # Linux
+    log stream --style compact --process nlockd --level debug   # macOS
+
+Syslog is used because launchd discards a job's standard error unless its
+plist names a file, which is then never rotated. Syslog messages reach the
+macOS unified log and, on Linux, the systemd journal, both of which rotate
+their storage and keep each message's level, so **journalctl -p** can filter
+by it. On macOS, debug messages are only kept while something such as **log
+stream \-\-level debug** is collecting them, so **log show** will not find
+them afterwards.
+
+Fatal startup errors are always printed to standard error, and are also sent
+to syslog when **nlockd** is logging there.
 
 # ENVIRONMENT
 
@@ -174,7 +196,8 @@ When installed with Homebrew, use **brew services start nlock** instead.
     - /tmp/nlock-*uid*.sock
 
 **NLOCK_LOG_LEVEL**
-:   Logging verbosity for both programs, written to standard error. One of
+:   Logging verbosity for both programs (see **LOGGING** for where
+    **nlockd** writes it). One of
     **Debug**, **Info**, **Warn**, **Error** or **None** (case-sensitive).
     Defaults to **None**. Fatal **nlockd** startup errors are always
     printed.
