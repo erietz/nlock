@@ -115,6 +115,32 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(man_page, .prefix, "share/man/man1/nlock.1").step);
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(man_page, .prefix, "share/man/man1/nlockd.1").step);
 
+    // Service manager definitions for running nlockd as a per-user daemon.
+    // They need nlockd's absolute path, which defaults to the install
+    // location. Packagers who build into a staging prefix can pass the final
+    // location, e.g. `-Dservice-bindir=/usr/bin`.
+    const service_bindir = b.option(
+        []const u8,
+        "service-bindir",
+        "Directory nlockd is run from by the installed service files (default: <prefix>/bin)",
+    ) orelse b.getInstallPath(.bin, "");
+    const service_files = b.addWriteFiles();
+    switch (target.result.os.tag) {
+        // $prefix/share/systemd/user is on systemd's user unit search path for
+        // /usr, /usr/local and ~/.local alike.
+        .linux => {
+            const unit = service_files.add("nlockd.service", fillBindir(b, @embedFile("contrib/systemd/nlockd.service.in"), service_bindir));
+            b.getInstallStep().dependOn(&b.addInstallFileWithDir(unit, .prefix, "share/systemd/user/nlockd.service").step);
+        },
+        // Agents must live in ~/Library/LaunchAgents, which is outside the
+        // prefix, so install the plist for the user to copy there.
+        .macos => {
+            const plist = service_files.add("com.github.erietz.nlockd.plist", fillBindir(b, @embedFile("contrib/launchd/com.github.erietz.nlockd.plist.in"), service_bindir));
+            b.getInstallStep().dependOn(&b.addInstallFileWithDir(plist, .prefix, "share/nlock/launchd/com.github.erietz.nlockd.plist").step);
+        },
+        else => {},
+    }
+
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
     // This will evaluate the `run` step rather than the default step.
@@ -218,4 +244,9 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+}
+
+/// Replaces `@bindir@` in a service file template.
+fn fillBindir(b: *std.Build, template: []const u8, bindir: []const u8) []const u8 {
+    return std.mem.replaceOwned(u8, b.allocator, template, "@bindir@", bindir) catch @panic("OOM");
 }

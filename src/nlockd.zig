@@ -6,7 +6,11 @@ const ll = nlock.logger.LogLevel;
 
 pub fn main(init: std.process.Init) void {
     run(init) catch |err| {
-        log(ll.Error, "Error: {s}", .{@errorName(err)});
+        // Printed regardless of NLOCK_LOG_LEVEL: the daemon is exiting.
+        switch (err) {
+            error.AlreadyRunning => std.debug.print("nlockd: another nlockd is already running on this socket\n", .{}),
+            else => std.debug.print("nlockd: {s}\n", .{@errorName(err)}),
+        }
         std.process.exit(1);
     };
 }
@@ -18,9 +22,34 @@ pub fn run(init: std.process.Init) !void {
 
 pub fn runServer(init: std.process.Init) !void {
     const io = init.io;
-    const socket_path = nlock.getSocketPath(init.environ_map);
+    const gpa = init.gpa;
     nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
 
+    // Everything the daemon creates (lock file, socket) is for this user only.
+    _ = std.c.umask(0o077);
+
+    const socket_path = try nlock.getSocketPath(gpa, init.environ_map);
+    defer gpa.free(socket_path);
+
+    // Holding an exclusive lock on `<socket>.lock` for the daemon's lifetime
+    // guarantees only one nlockd serves a socket path. The kernel drops the
+    // lock however the daemon exits, so it never goes stale. The lock file is
+    // deliberately never deleted: removing it would let a second daemon lock
+    // a fresh file while the first still holds the old one.
+    const lock_path = try std.fmt.allocPrint(gpa, "{s}.lock", .{socket_path});
+    defer gpa.free(lock_path);
+    const lock_file = std.Io.Dir.cwd().createFile(io, lock_path, .{
+        .truncate = false,
+        .lock = .exclusive,
+        .lock_nonblocking = true,
+    }) catch |err| switch (err) {
+        error.WouldBlock => return error.AlreadyRunning,
+        else => return err,
+    };
+    defer lock_file.close(io);
+
+    // We hold the lock, so any socket file left at the path belongs to a
+    // daemon that is no longer running.
     std.Io.Dir.cwd().deleteFile(io, socket_path) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
@@ -30,9 +59,12 @@ pub fn runServer(init: std.process.Init) !void {
     const address = try std.Io.net.UnixAddress.init(socket_path);
     var server = try address.listen(io, .{});
     defer server.deinit(io);
+
+    const socket_path_z = try gpa.dupeZ(u8, socket_path);
+    defer gpa.free(socket_path_z);
+    installShutdownHandlers(socket_path_z);
     log(ll.Info, "Server started and listening on {s}", .{socket_path});
 
-    const gpa = init.gpa;
     var map = nlock.ThreadSafeHashMap([]const u8, nlock.Lock).init(io, gpa);
     // Declared before `group` so this runs after `group.cancel`: no connection
     // tasks remain, so it is safe to walk the inner map without the mutex.
@@ -62,6 +94,31 @@ pub fn runServer(init: std.process.Init) !void {
             stream.close(io);
         };
     }
+}
+
+/// Socket path removed by `handleShutdownSignal`. Set once before the
+/// handlers are installed and never changed afterwards.
+var shutdown_socket_path: ?[*:0]const u8 = null;
+
+/// Signals a service manager or terminal sends to stop the daemon.
+const shutdown_signals = [_]std.posix.SIG{ .TERM, .INT, .HUP };
+
+/// Removes the socket and exits immediately. Lock state lives only in memory,
+/// so there is nothing else to save, and both calls are async-signal-safe.
+/// Clients still connected see their connection drop.
+fn handleShutdownSignal(_: std.posix.SIG) callconv(.c) void {
+    if (shutdown_socket_path) |path| _ = std.c.unlink(path);
+    std.c._exit(0);
+}
+
+fn installShutdownHandlers(socket_path: [*:0]const u8) void {
+    shutdown_socket_path = socket_path;
+    const act: std.posix.Sigaction = .{
+        .handler = .{ .handler = handleShutdownSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    for (shutdown_signals) |sig| std.posix.sigaction(sig, &act, null);
 }
 
 /// Adapts `handleConnection` to the `Cancelable!void` signature `Io.Group`
@@ -151,10 +208,20 @@ fn handleConnection(
     defer release_req.deinit(allocator);
     switch (release_req.request_type) {
         nlock.LockRequestType.ReleaseLock => {
+            // A connection may only release the lock it acquired, whatever
+            // name the request carries; otherwise any client could release
+            // locks it does not hold.
+            if (!std.mem.eql(u8, release_req.name, req.name)) {
+                log(ll.Warn, "Client holding '{s}' asked to release '{s}'. Releasing '{s}'.", .{
+                    req.name,
+                    release_req.name,
+                    req.name,
+                });
+            }
             handleReleaseLockRequest(
                 io,
                 allocator,
-                release_req,
+                req.name,
                 map,
                 &writer.interface,
             ) catch |err| {
@@ -327,24 +394,21 @@ fn handleAcquireLockRequest(
 fn handleReleaseLockRequest(
     io: Io,
     allocator: std.mem.Allocator,
-    lock_request: nlock.LockRequest,
+    name: []const u8,
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
 ) !void {
-    log(ll.Info, "Releasing lock for name '{s}' (global: {})", .{
-        lock_request.name,
-        lock_request.global,
-    });
+    log(ll.Info, "Releasing lock for name '{s}'", .{name});
 
-    if (releaseLock(io, allocator, map, lock_request.name)) {
-        log(ll.Info, "Lock for name '{s}' released successfully.", .{lock_request.name});
+    if (releaseLock(io, allocator, map, name)) {
+        log(ll.Info, "Lock for name '{s}' released successfully.", .{name});
         const lock_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Ok).toJson(allocator);
         defer allocator.free(lock_response);
         try nlock.writeLine(writer, lock_response);
         return;
     }
 
-    log(ll.Error, "No lock found for name '{s}' to release.", .{lock_request.name});
+    log(ll.Error, "No lock found for name '{s}' to release.", .{name});
     return error.LockNotFound;
 }
 

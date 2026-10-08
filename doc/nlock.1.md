@@ -118,22 +118,72 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
 # NLOCKD
 
-**nlockd** runs in the foreground and takes no arguments. On startup it
-removes any stale socket file at the socket path, then listens for
-connections. It holds all lock state in memory; locks do not survive a
-restart of the daemon. The socket file is removed when the daemon exits
-cleanly.
+**nlockd** runs in the foreground, takes no arguments and logs to standard
+error, so it is meant to be started by a service manager (see **RUNNING
+NLOCKD AS A SERVICE**) or directly in a terminal. Each user runs their own
+**nlockd**, and **nlock** only talks to a daemon owned by the same user or by
+root.
+
+Only one **nlockd** can serve a given socket path. On startup it takes an
+exclusive lock on *socket*.lock; if another daemon holds it, **nlockd** exits
+with status 1. Having taken the lock, it removes any stale socket file left
+by a daemon that did not exit cleanly, then listens for connections. The
+socket and lock file are created readable and writable by the owner only.
+
+All lock state is held in memory; locks do not survive a restart of the
+daemon. On **SIGTERM**, **SIGINT** or **SIGHUP** the daemon removes its
+socket and exits with status 0; clients still connected lose their locks.
+
+# RUNNING NLOCKD AS A SERVICE
+
+**zig build install** installs a service definition alongside the binaries,
+pointing at the installed **nlockd**.
+
+On Linux, a systemd user unit is installed as
+*PREFIX*/share/systemd/user/nlockd.service. Start it now and at every login
+with:
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now nlockd
+
+Logs are available with **journalctl \-\-user -u nlockd**.
+
+On macOS, a launchd agent is installed as
+*PREFIX*/share/nlock/launchd/com.github.erietz.nlockd.plist. Copy it to
+*~/Library/LaunchAgents* and load it with:
+
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.erietz.nlockd.plist
+
+and unload it with:
+
+    launchctl bootout gui/$(id -u)/com.github.erietz.nlockd
+
+When installed with Homebrew, use **brew services start nlock** instead.
 
 # ENVIRONMENT
 
 **NLOCK_SOCKET**
 :   Path of the Unix domain socket used by both **nlock** and **nlockd**.
-    Defaults to */tmp/nlock.sock*.
+    **nlock** and **nlockd** must agree on the path, so if you set it for
+    one, set it for both, including in the service definition. When unset or
+    empty, the default is the first of:
+
+    - *$XDG_RUNTIME_DIR*/nlock.sock on Linux, if **XDG_RUNTIME_DIR** is set
+    - nlock.sock in the per-user temporary directory on macOS (see
+      **getconf DARWIN_USER_TEMP_DIR**)
+    - /tmp/nlock-*uid*.sock
 
 **NLOCK_LOG_LEVEL**
 :   Logging verbosity for both programs, written to standard error. One of
     **Debug**, **Info**, **Warn**, **Error** or **None** (case-sensitive).
-    Defaults to **None**.
+    Defaults to **None**. Fatal **nlockd** startup errors are always
+    printed.
+
+# FILES
+
+*socket*.lock
+:   Held by the running **nlockd** to prevent a second daemon on the same
+    socket. It is left in place when the daemon exits; this is intentional.
 
 # EXIT STATUS
 
@@ -142,8 +192,9 @@ and the lock has been released. The exit status of *command* itself is not
 propagated.
 
 **nlock** exits **1** if the arguments are invalid, the daemon is not
-running, the lock is busy with **\-\-nonblock**, the **\-\-timeout** expires,
-or the lock could not be released.
+running or is owned by another user, the lock is busy with
+**\-\-nonblock**, the **\-\-timeout** expires, or the lock could not be
+released.
 
 # EXAMPLES
 
