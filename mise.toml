@@ -43,7 +43,7 @@ launchctl bootout gui/$(id -u)/com.github.erietz.nlockd
 cp "${PREFIX}/share/nlock/launchd/com.github.erietz.nlockd.plist" ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.erietz.nlockd.plist
 launchctl print gui/$(id -u)/com.github.erietz.nlockd
-echo "check the logs via tail -f ~/Library/Logs/nlockd.log"
+echo "check the logs via: log stream --style compact --process nlockd --level debug"
 """
 
 [tasks."daemon-macos-user-stop"]
@@ -51,5 +51,4 @@ env.PREFIX = "$HOME/.local"
 run = """
 launchctl bootout gui/$(id -u)/com.github.erietz.nlockd
 # rm ~/Library/LaunchAgents/com.github.erietz.nlockd.plist
-# rm ~/Library/Logs/nlockd.log
 """
