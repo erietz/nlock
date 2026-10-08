@@ -135,8 +135,8 @@ pub fn build(b: *std.Build) void {
         // Agents must live in ~/Library/LaunchAgents, which is outside the
         // prefix, so install the plist for the user to copy there.
         .macos => {
-            const plist = service_files.add("com.github.erietz.nlockd.plist", fillTemplate(b, @embedFile("contrib/launchd/com.github.erietz.nlockd.plist.in"), "@bindir@", service_bindir));
-            b.getInstallStep().dependOn(&b.addInstallFileWithDir(plist, .prefix, "share/nlock/launchd/com.github.erietz.nlockd.plist").step);
+            const plist = service_files.add("com.erietz.nlockd.plist", fillTemplate(b, @embedFile("contrib/launchd/com.erietz.nlockd.plist.in"), "@bindir@", service_bindir));
+            b.getInstallStep().dependOn(&b.addInstallFileWithDir(plist, .prefix, "share/nlock/launchd/com.erietz.nlockd.plist").step);
         },
         else => {},
     }

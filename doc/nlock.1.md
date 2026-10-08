@@ -148,14 +148,14 @@ with:
     systemctl --user enable --now nlockd
 
 On macOS, a launchd agent is installed as
-*PREFIX*/share/nlock/launchd/com.github.erietz.nlockd.plist. Copy it to
+*PREFIX*/share/nlock/launchd/com.erietz.nlockd.plist. Copy it to
 *~/Library/LaunchAgents* and load it with:
 
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.erietz.nlockd.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.erietz.nlockd.plist
 
 and unload it with:
 
-    launchctl bootout gui/$(id -u)/com.github.erietz.nlockd
+    launchctl bootout gui/$(id -u)/com.erietz.nlockd
 
 When installed with Homebrew, use **brew services start nlock** instead.
 

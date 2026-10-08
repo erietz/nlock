@@ -39,16 +39,16 @@ rm -rf {{ vars.PREFIX }}/share/man/man1/nlockd.1
 env.PREFIX = "$HOME/.local"
 run = """
 zig build install --prefix "${PREFIX}"
-launchctl bootout gui/$(id -u)/com.github.erietz.nlockd
-cp "${PREFIX}/share/nlock/launchd/com.github.erietz.nlockd.plist" ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.erietz.nlockd.plist
-launchctl print gui/$(id -u)/com.github.erietz.nlockd
+launchctl bootout gui/$(id -u)/com.erietz.nlockd
+cp "${PREFIX}/share/nlock/launchd/com.erietz.nlockd.plist" ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.erietz.nlockd.plist
+launchctl print gui/$(id -u)/com.erietz.nlockd
 echo "check the logs via: log stream --style compact --process nlockd --level debug"
 """
 
 [tasks."daemon-macos-user-stop"]
 env.PREFIX = "$HOME/.local"
 run = """
-launchctl bootout gui/$(id -u)/com.github.erietz.nlockd
-# rm ~/Library/LaunchAgents/com.github.erietz.nlockd.plist
+launchctl bootout gui/$(id -u)/com.erietz.nlockd
+# rm ~/Library/LaunchAgents/com.erietz.nlockd.plist
 """

@@ -6,7 +6,7 @@ fills in `@bindir@` and installs the right one for the target OS:
 | Template | Installed as |
 |---|---|
 | `systemd/nlockd.service.in` | `<prefix>/share/systemd/user/nlockd.service` (Linux) |
-| `launchd/com.github.erietz.nlockd.plist.in` | `<prefix>/share/nlock/launchd/com.github.erietz.nlockd.plist` (macOS) |
+| `launchd/com.erietz.nlockd.plist.in` | `<prefix>/share/nlock/launchd/com.erietz.nlockd.plist` (macOS) |
 
 `@bindir@` defaults to `<prefix>/bin`. When building into a staging
 directory for a package, pass the final location instead:
