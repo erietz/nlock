@@ -1,6 +1,7 @@
 [tools]
 zig = "0.16.0"
 zls = "0.16.0"
+pandoc = "3.12"
 
 [tasks.build]
 run = "zig build"
@@ -55,7 +56,7 @@ env.PREFIX = "$HOME/.local"
 run = """
 set -eoux pipefail
 launchctl bootout gui/$(id -u)/com.erietz.nlockd
-# rm ~/Library/LaunchAgents/com.erietz.nlockd.plist
+echo "optionally clean up the plist file -> rm ~/Library/LaunchAgents/com.erietz.nlockd.plist"
 """
 
 [tasks."daemon-systemd-user-start"]
