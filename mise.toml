@@ -37,7 +37,7 @@ rm -f {{ env.PREFIX }}/share/man/man1/nlock.1
 rm -f {{ env.PREFIX }}/share/man/man1/nlockd.1
 """
 
-[tasks."daemon-macos-user-start"]
+[tasks."daemon-launchd-user-start"]
 env.PREFIX = "$HOME/.local"
 depends = [
 	{ task = "install", env = { PREFIX = "$HOME/.local" } },
