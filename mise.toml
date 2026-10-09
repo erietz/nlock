@@ -51,7 +51,7 @@ launchctl print gui/$(id -u)/com.erietz.nlockd
 echo "check the logs via: log stream --style compact --process nlockd --level debug"
 """
 
-[tasks."daemon-macos-user-stop"]
+[tasks."daemon-launchd-user-stop"]
 env.PREFIX = "$HOME/.local"
 run = """
 set -eoux pipefail

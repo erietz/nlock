@@ -27,7 +27,7 @@ To install from source:
         ```
     2. macOS:
         ```bash
-        mise run daemon-macos-user-start
+        mise run daemon-launchd-user-start
         ```
 
 If you do not have `mise` installed, view the commands in `./mise.toml` and run
