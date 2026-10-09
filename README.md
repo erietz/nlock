@@ -1,3 +1,37 @@
+nlock, nlockd - run commands while holding named locks
+
+See [the man page](./docs/nlock.1.md) for the full documentation.
+
+# Installation
+
+## From source (user installation)
+
+To install from source:
+
+1. Clone the repository:
+    ```bash
+    git clone https://github.com/erietz/nlock.git
+    cd nlock
+
+    # Trust the mise.toml file
+    mise trust
+    # Install the dependencies
+    mise install
+    # Build and install to ~/.local as the prefined prefix
+    mise run install
+    ```
+2. Start the nlockd service:
+    1. Linux:
+        ```bash
+        mise run daemon-systemd-user-start
+        ```
+    2. macOS:
+        ```bash
+        mise run daemon-macos-user-start
+        ```
+
+If you do not have `mise` installed, view the commands in `./mise.toml` and run
+them manually.
 # Examples
 
 Every `nlock run` that uses the same lock name waits its turn and runs in
@@ -105,34 +139,3 @@ nlock list --json | jq -r --argjson now "$(date +%s)" \
 ```
 
 See `man nlock` for every option.
-
-# Installation
-
-## From source (user installation)
-
-To install from source:
-
-1. Clone the repository:
-    ```bash
-    git clone https://github.com/erietz/nlock.git
-    cd nlock
-
-    # Trust the mise.toml file
-    mise trust
-    # Install the dependencies
-    mise install
-    # Build and install to ~/.local as the prefined prefix
-    mise run install
-    ```
-2. Start the nlockd service:
-    1. Linux:
-        ```bash
-        mise run daemon-systemd-user-start
-        ```
-    2. macOS:
-        ```bash
-        mise run daemon-macos-user-start
-        ```
-
-If you do not have `mise` installed, view the commands in `./mise.toml` and run
-them manually.

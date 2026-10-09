@@ -23,7 +23,7 @@ run = "./tmux_tests.sh"
 
 [tasks."install"]
 env.PREFIX = "$HOME/.local"
-run = 'zig build install --prefix {{ env.PREFIX }}'
+run = 'zig build install man --prefix {{ env.PREFIX }}'
 
 [tasks."uninstall"]
 env.PREFIX = "$HOME/.local"
