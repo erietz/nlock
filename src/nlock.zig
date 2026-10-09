@@ -23,6 +23,9 @@ pub fn main(init: std.process.Init) void {
             error.LockServerNotRunning => {
                 std.debug.print("Lock server is not running. Please start the lock server first.\n", .{});
             },
+            error.UntrustedLockServer => {
+                std.debug.print("Lock server socket belongs to another user. Refusing to use it.\n", .{});
+            },
             error.LockAcquireTimeout => {
                 std.debug.print("Failed to acquire lock within the specified timeout.\n", .{});
             },
@@ -45,12 +48,17 @@ pub fn run(init: std.process.Init) !void {
     nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
     nlock.printer.init(init.io);
 
-    const address = try std.Io.net.UnixAddress.init(nlock.getSocketPath(init.environ_map));
+    const socket_path = try nlock.getSocketPath(init.gpa, init.environ_map);
+    defer init.gpa.free(socket_path);
+    log(ll.Debug, "Connecting to lock server at {s}", .{socket_path});
+
+    const address = try std.Io.net.UnixAddress.init(socket_path);
     const stream = address.connect(init.io) catch |err| {
         log(ll.Error, "Failed to connect to lock server: {s}", .{@errorName(err)});
         return error.LockServerNotRunning;
     };
     defer stream.close(init.io);
+    try verifyServer(stream);
 
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(init.io, &write_buffer);
@@ -68,6 +76,17 @@ pub fn run(init: std.process.Init) !void {
     switch (command) {
         .run => |options| try runLocked(ctx, options),
         .list => |options| try runList(ctx, options),
+    }
+}
+
+/// Refuses to talk to a daemon run by another user (other than root), in case
+/// someone else created a socket at our path to impersonate it.
+fn verifyServer(stream: std.Io.net.Stream) !void {
+    const server = try nlock.peer.peerCredentials(stream);
+    const uid = std.c.getuid();
+    if (server.uid != uid and server.uid != 0) {
+        log(ll.Error, "Lock server is run by uid {d}, expected {d} or root", .{ server.uid, uid });
+        return error.UntrustedLockServer;
     }
 }
 

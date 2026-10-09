@@ -344,6 +344,109 @@ test "client survives SIGINT and releases the lock after the command exits" {
     try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
 }
 
+test "a second daemon refuses to take over a socket in use" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const second = try std.process.run(gpa, io, .{
+        .argv = &.{@import("build_options").nlockd_path},
+        .environ_map = &daemon.environ,
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(10), .clock = .awake } },
+    });
+    defer gpa.free(second.stdout);
+    defer gpa.free(second.stderr);
+    try std.testing.expectEqual(Term{ .exited = 1 }, second.term);
+    try std.testing.expect(std.mem.indexOf(u8, second.stderr, "already running") != null);
+
+    // The first daemon still owns the socket.
+    const result = try daemon.client(gpa, io, &.{ "run", "mylock", "--", "true" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+}
+
+test "daemon removes its socket on SIGTERM" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    try std.posix.kill(daemon.child.id.?, .TERM);
+    try std.testing.expectEqual(Term{ .exited = 0 }, try daemon.child.wait(io));
+    try std.testing.expectError(error.FileNotFound, daemon.tmp.dir.access(io, "nlock.sock", .{}));
+
+    // The single-instance lock was released with the process.
+    try daemon.restart(io);
+    const result = try daemon.client(gpa, io, &.{ "run", "mylock", "--", "true" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+}
+
+test "daemon replaces a stale socket left by a killed daemon" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    // SIGKILL gives the daemon no chance to remove its socket.
+    try daemon.restart(io);
+
+    const result = try daemon.client(gpa, io, &.{ "run", "mylock", "--", "true" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+}
+
+test "a client cannot release a lock it does not hold" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const go_path = try daemon.tmpPath(gpa, "go");
+    defer gpa.free(go_path);
+    defer daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" }) catch {};
+    const script = try std.fmt.allocPrint(gpa, "while [ ! -f {s} ]; do sleep 0.01; done", .{go_path});
+    defer gpa.free(script);
+
+    var holder = try daemon.spawnClient(gpa, io, &.{ "run", "victim", "--", "sh", "-c", script });
+    var holder_done = false;
+    defer if (!holder_done) holder.kill(io);
+    try waitForListOutput(gpa, io, daemon, &.{ "list", "-q" }, "victim\n");
+
+    // Speak the protocol directly: acquire "mine", then ask to release
+    // "victim" instead.
+    const address = try std.Io.net.UnixAddress.init(daemon.socket_path);
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    var read_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buffer);
+    var write_buffer: [1024]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+
+    for ([_]nlock.LockRequestType{ .AcquireLock, .ReleaseLock }, [_][]const u8{ "mine", "victim" }) |request_type, name| {
+        const request = try nlock.LockRequest.init(request_type, name, false, false, null, "true").toJson(gpa);
+        defer gpa.free(request);
+        try nlock.writeLine(&writer.interface, request);
+        const response = (try reader.interface.takeDelimiter('\n')).?;
+        try std.testing.expectEqual(nlock.LockResponseStatus.Ok, (try nlock.LockResponse.fromJson(response, gpa)).status);
+    }
+
+    // The daemon released "mine", the lock this connection held.
+    try waitForListOutput(gpa, io, daemon, &.{ "list", "-q" }, "victim\n");
+
+    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
+    holder_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
+}
+
 test "client fails when no daemon is running" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

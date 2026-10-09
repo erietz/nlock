@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for nlockd. The nlockd path is filled in by `zig build`.
+
+  Load with:
+    cp ${PREFIX}/share/nlock/launchd/com.erietz.nlockd.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.erietz.nlockd.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.erietz.nlockd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>@bindir@/nlockd</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Restart after a crash, but not after a clean stop. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NLOCK_LOG_LEVEL</key>
+        <string>Debug</string>
+    </dict>
+</dict>
+</plist>

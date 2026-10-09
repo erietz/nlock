@@ -30,16 +30,20 @@ pub const Daemon = struct {
         errdefer self.environ.deinit();
         try self.environ.put(nlock.ENV_SOCKET_PATH, self.socket_path);
 
-        self.child = try std.process.spawn(io, .{
-            .argv = &.{build_options.nlockd_path},
-            .environ_map = &self.environ,
-            .stdout = .ignore,
-            .stderr = .ignore,
-        });
+        self.child = try spawnDaemon(io, &self.environ);
         errdefer self.child.kill(io);
 
         try waitForSocket(io, self.socket_path);
         return self;
+    }
+
+    /// Kills the daemon with SIGKILL, so it leaves its socket file behind,
+    /// then starts a new one on the same socket. Safe to call after the
+    /// daemon has already exited and been waited on.
+    pub fn restart(self: *Daemon, io: Io) !void {
+        self.child.kill(io);
+        self.child = try spawnDaemon(io, &self.environ);
+        try waitForSocket(io, self.socket_path);
     }
 
     pub fn stop(self: *Daemon, gpa: std.mem.Allocator, io: Io) void {
@@ -83,6 +87,15 @@ pub const Daemon = struct {
         return std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ self.tmp.sub_path, name });
     }
 };
+
+fn spawnDaemon(io: Io, environ: *const std.process.Environ.Map) !std.process.Child {
+    return std.process.spawn(io, .{
+        .argv = &.{build_options.nlockd_path},
+        .environ_map = environ,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+}
 
 fn clientArgv(gpa: std.mem.Allocator, args: []const []const u8) ![]const []const u8 {
     const argv = try gpa.alloc([]const u8, args.len + 1);
