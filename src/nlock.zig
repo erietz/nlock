@@ -12,7 +12,7 @@ const Context = struct {
 };
 
 pub fn main(init: std.process.Init) void {
-    run(init) catch |err| {
+    const status = run(init) catch |err| {
         switch (err) {
             error.InvalidArguments => {
                 std.debug.print("{s}", .{nlock.cli.USAGE});
@@ -38,9 +38,11 @@ pub fn main(init: std.process.Init) void {
         }
         std.process.exit(1);
     };
+    std.process.exit(status);
 }
 
-pub fn run(init: std.process.Init) !void {
+/// Returns the exit status for nlock: the command's for `run`, 0 for `list`.
+pub fn run(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.gpa);
     defer init.gpa.free(args);
     const command = try nlock.cli.Command.parseArgs(args);
@@ -74,8 +76,11 @@ pub fn run(init: std.process.Init) !void {
     };
 
     switch (command) {
-        .run => |options| try runLocked(ctx, options),
-        .list => |options| try runList(ctx, options),
+        .run => |options| return runLocked(ctx, options),
+        .list => |options| {
+            try runList(ctx, options);
+            return 0;
+        },
     }
 }
 
@@ -90,7 +95,8 @@ fn verifyServer(stream: std.Io.net.Stream) !void {
     }
 }
 
-pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !void {
+/// Runs the command under the lock and returns its exit status.
+pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
     const acquire_status = try acquireLock(
         ctx.allocator,
         ctx.writer,
@@ -101,13 +107,9 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !void {
     switch (acquire_status) {
         nlock.LockResponseStatus.Ok => {
             log(ll.Debug, "Lock acquired successfully. Running command", .{});
-            // TODO: nlock exits 0 even when the command fails or is killed
-            // by a signal. Propagate the command's exit status instead.
-            runCommand(ctx.io, options.command) catch |err| {
-                // Even if the command fails, we should still attempt to release
-                // the lock so no return error here, just log the error
-                std.debug.print("Failed to run command: {s}\n", .{@errorName(err)});
-            };
+            // runCommand reports its own failures as an exit status, so the
+            // lock is always released below.
+            const status = runCommand(ctx.io, options.command);
             log(ll.Debug, "Command finished. Releasing lock: {s}", .{options.name});
 
             const release_status = try releaseLock(
@@ -120,6 +122,7 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !void {
             switch (release_status) {
                 nlock.LockResponseStatus.Ok => {
                     log(ll.Debug, "Lock released successfully", .{});
+                    return status;
                 },
                 else => {
                     log(ll.Error, "Failed to release lock. Status: {d}", .{release_status});
@@ -464,7 +467,14 @@ fn ignoreSignal(_: std.posix.SIG) callconv(.c) void {}
 /// child receives them too, so nlock outlives it and can release the lock.
 const terminal_signals = [_]std.posix.SIG{ .INT, .QUIT };
 
-pub fn runCommand(io: Io, command: []const []const u8) !void {
+/// Exit statuses for a command that could not be started, as used by shells
+/// and by `env`, `nohup` and `flock`.
+const exit_not_executable = 126;
+const exit_not_found = 127;
+
+/// Runs the command and returns its exit status, or 128 plus the signal
+/// number if a signal ended it, as a shell reports it.
+pub fn runCommand(io: Io, command: []const []const u8) u8 {
     var old_actions: [terminal_signals.len]std.posix.Sigaction = undefined;
     const act: std.posix.Sigaction = .{
         .handler = .{ .handler = ignoreSignal },
@@ -479,27 +489,30 @@ pub fn runCommand(io: Io, command: []const []const u8) !void {
     };
 
     var child = std.process.spawn(io, spawnOptions) catch |err| {
-        std.debug.print("Failed to spawn command: {s}\n", .{@errorName(err)});
-        return err;
+        std.debug.print("nlock: {s}: {s}\n", .{ command[0], @errorName(err) });
+        return switch (err) {
+            error.FileNotFound => exit_not_found,
+            else => exit_not_executable,
+        };
     };
 
     const term = child.wait(io) catch |err| {
-        std.debug.print("Failed to wait for command: {s}\n", .{@errorName(err)});
-        return err;
+        std.debug.print("nlock: failed to wait for {s}: {s}\n", .{ command[0], @errorName(err) });
+        return 1;
     };
 
     switch (term) {
-        .exited => {
-            log(ll.Debug, "Process exited with code: {d}", .{term.exited});
+        .exited => |code| {
+            log(ll.Debug, "Process exited with code: {d}", .{code});
+            return code;
         },
-        .signal => {
-            log(ll.Debug, "Process terminated by signal: {d}", .{term.signal});
+        .signal, .stopped => |sig| {
+            log(ll.Debug, "Process ended by signal: {d}", .{@intFromEnum(sig)});
+            return 128 +| @as(u8, @intCast(@intFromEnum(sig)));
         },
-        .stopped => {
-            log(ll.Debug, "Process stopped by signal: {d}", .{term.signal});
-        },
-        .unknown => {
-            log(ll.Debug, "Process terminated with unknown status.", .{});
+        .unknown => |status| {
+            log(ll.Debug, "Process ended with unknown status: {d}", .{status});
+            return 1;
         },
     }
 }

@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) void {
     // re-runs when the source changes.
     const man_step = b.step("man", "Generate and install the man pages (requires pandoc)");
     const man_cmd = b.addSystemCommand(&.{ "pandoc", "--standalone", "--to", "man" });
-    man_cmd.addFileArg(b.path("doc/nlock.1.md"));
+    man_cmd.addFileArg(b.path("docs/nlock.1.md"));
     const man_page = man_cmd.captureStdOut(.{});
     man_step.dependOn(&b.addInstallFileWithDir(man_page, .prefix, "share/man/man1/nlock.1").step);
     man_step.dependOn(&b.addInstallFileWithDir(man_page, .prefix, "share/man/man1/nlockd.1").step);
