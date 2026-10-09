@@ -19,6 +19,35 @@ test "client runs a command under a lock" {
     try std.testing.expectEqualStrings("hello\n", result.stdout);
 }
 
+test "client exits with the command's exit status and releases the lock" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const cases = [_]struct { command: []const []const u8, expected: u8 }{
+        .{ .command = &.{"false"}, .expected = 1 },
+        .{ .command = &.{ "sh", "-c", "exit 42" }, .expected = 42 },
+        .{ .command = &.{ "sh", "-c", "kill -TERM $$" }, .expected = 128 + 15 },
+        .{ .command = &.{"nlock-test-no-such-command"}, .expected = 127 },
+    };
+    for (cases) |case| {
+        const args = try std.mem.concat(gpa, []const u8, &.{ &.{ "run", "mylock", "--" }, case.command });
+        defer gpa.free(args);
+        const result = try daemon.client(gpa, io, args);
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(Term{ .exited = case.expected }, result.term);
+
+        // The lock was released despite the failure.
+        const held = try daemon.client(gpa, io, &.{ "list", "-q" });
+        defer gpa.free(held.stdout);
+        defer gpa.free(held.stderr);
+        try std.testing.expectEqualStrings("", held.stdout);
+    }
+}
+
 test "lock can be reacquired after it is released" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

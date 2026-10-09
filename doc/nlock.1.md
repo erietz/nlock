@@ -210,14 +210,19 @@ to syslog when **nlockd** is logging there.
 
 # EXIT STATUS
 
-**nlock** exits **0** once the lock has been acquired, the command has run
-and the lock has been released. The exit status of *command* itself is not
-propagated.
+**nlock run** exits with the exit status of *command*, so it can be used in
+place of the command in scripts and **&&** chains. If a signal ends
+*command*, **nlock** exits with 128 plus the signal number, as a shell
+reports it. If *command* cannot be run, **nlock** exits **127** when it is
+not found and **126** otherwise.
 
 **nlock** exits **1** if the arguments are invalid, the daemon is not
 running or is owned by another user, the lock is busy with
 **\-\-nonblock**, the **\-\-timeout** expires, or the lock could not be
-released.
+released. These errors cannot be told apart from a *command* that itself
+exits **1**.
+
+**nlock list** exits **0** on success.
 
 # EXAMPLES
 
