@@ -21,26 +21,30 @@ env.NLOCK_LOG_LEVEL = "Debug"
 run = "./tmux_tests.sh"
 
 [tasks."install"]
-vars.PREFIX = "$HOME/.local"
-run = 'zig build install --prefix {{ vars.PREFIX }}'
+env.PREFIX = "$HOME/.local"
+run = 'zig build install --prefix {{ env.PREFIX }}'
 
 [tasks."uninstall"]
-vars.PREFIX = "$HOME/.local"
-# run = "zig build uninstall --prefix {{ vars.PREFIX }}" # Broken with a todo reference to GH issue
+env.PREFIX = "$HOME/.local"
+# run = "zig build uninstall --prefix {{ env.PREFIX }}" # Broken with a todo reference to GH issue
 run = """
-rm -rf {{ vars.PREFIX }}/bin/nlock
-rm -rf {{ vars.PREFIX }}/bin/nlockd
-rm -rf {{ vars.PREFIX }}/share/nlock
-rm -rf {{ vars.PREFIX }}/share/man/man1/nlock.1
-rm -rf {{ vars.PREFIX }}/share/man/man1/nlockd.1
+set -eoux pipefail
+rm -f {{ env.PREFIX }}/bin/nlock
+rm -f {{ env.PREFIX }}/bin/nlockd
+rm -rf {{ env.PREFIX }}/share/nlock
+rm -f {{ env.PREFIX }}/share/man/man1/nlock.1
+rm -f {{ env.PREFIX }}/share/man/man1/nlockd.1
 """
 
 [tasks."daemon-macos-user-start"]
 env.PREFIX = "$HOME/.local"
+depends = [
+	{ task = "install", env = { PREFIX = "$HOME/.local" } },
+]
 run = """
-zig build install --prefix "${PREFIX}"
-launchctl bootout gui/$(id -u)/com.erietz.nlockd
-cp "${PREFIX}/share/nlock/launchd/com.erietz.nlockd.plist" ~/Library/LaunchAgents/
+set -eoux pipefail
+launchctl bootout gui/$(id -u)/com.erietz.nlockd || true
+cp "{{ env.PREFIX }}/share/nlock/launchd/com.erietz.nlockd.plist" ~/Library/LaunchAgents/
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.erietz.nlockd.plist
 launchctl print gui/$(id -u)/com.erietz.nlockd
 echo "check the logs via: log stream --style compact --process nlockd --level debug"
@@ -49,6 +53,25 @@ echo "check the logs via: log stream --style compact --process nlockd --level de
 [tasks."daemon-macos-user-stop"]
 env.PREFIX = "$HOME/.local"
 run = """
+set -eoux pipefail
 launchctl bootout gui/$(id -u)/com.erietz.nlockd
 # rm ~/Library/LaunchAgents/com.erietz.nlockd.plist
+"""
+
+[tasks."daemon-systemd-user-start"]
+env.PREFIX = "$HOME/.local"
+run = """
+set -eoux pipefail
+systemctl --user daemon-reload
+systemctl --user enable --now nlockd
+systemctl --user status nlockd
+echo "check the logs via: journalctl --user-unit nlockd -f"
+"""
+
+[tasks."daemon-systemd-user-stop"]
+env.PREFIX = "$HOME/.local"
+run = """
+set -eoux pipefail
+systemctl --user disable --now nlockd
+systemctl --user daemon-reload
 """

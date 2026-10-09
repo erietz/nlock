@@ -3,7 +3,7 @@
   launchd agent for nlockd. The nlockd path is filled in by `zig build`.
 
   Load with:
-    cp com.erietz.nlockd.plist ~/Library/LaunchAgents/
+    cp ${PREFIX}/share/nlock/launchd/com.erietz.nlockd.plist ~/Library/LaunchAgents/
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.erietz.nlockd.plist
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
