@@ -6,6 +6,22 @@ pandoc = "3.12"
 [tasks.build]
 run = "zig build"
 
+[tasks."build:cross"]
+description = "Cross-compile for macOS and Linux on x86_64 and aarch64"
+run = """
+set -euo pipefail
+targets=(
+  "aarch64-macos"
+  "x86_64-macos"
+  "aarch64-linux"
+  "x86_64-linux"
+)
+for target in "${targets[@]}"; do
+  echo "Building $target..."
+  zig build install man -Dtarget="$target" -Doptimize=ReleaseSafe --prefix "dist/$target"
+done
+"""
+
 [tasks."test:unit"]
 run = "zig build test"
 
