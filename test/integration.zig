@@ -82,7 +82,6 @@ test "multiple concurrent clients contending for the same lock all succeed" {
     }
 }
 
-
 test "second client waits until the held lock is released" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
