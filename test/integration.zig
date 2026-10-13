@@ -63,6 +63,25 @@ test "lock can be reacquired after it is released" {
     }
 }
 
+test "multiple concurrent clients contending for the same lock all succeed" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const client_count = 6;
+    var clients: [client_count]std.process.Child = undefined;
+    for (0..client_count) |i| {
+        clients[i] = try daemon.spawnClient(gpa, io, &.{ "run", "contended_lock", "--", "true" });
+    }
+
+    for (0..client_count) |i| {
+        const term = try clients[i].wait(io);
+        try std.testing.expectEqual(Term{ .exited = 0 }, term);
+    }
+}
+
 test "second client waits until the held lock is released" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

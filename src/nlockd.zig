@@ -334,59 +334,25 @@ fn handleAcquireLockRequest(
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
 ) !bool {
-    // Check and insert in one atomic step so two clients racing for the same
-    // name cannot both acquire it.
-    // The map owns copies of both the name and the command: `lock_request`
-    // slices point into this connection's read buffer, which is reused by the
-    // next read and invalid once the connection ends.
-    const lock_name_copy = try allocator.dupe(u8, lock_request.name);
-    const command_copy = allocator.dupe(u8, lock_request.command) catch |err| {
-        allocator.free(lock_name_copy);
-        return err;
-    };
-    // defer allocator.free(lock_name_copy);
-    // defer allocator.free(command_copy);
+    // Acquire the map mutex so checking whether the lock is held, creating
+    // the lock, or adding a waiter to the queue is atomic with respect to
+    // other acquires and releases.
+    map.lock();
+    if (map.map.getPtr(lock_request.name)) |existing_lock| {
+        log(ll.Info, "Lock for name '{s}' is already acquired", .{lock_request.name});
 
-    const lock = nlock.Lock{
-        .command = command_copy,
-        .uid = peer.uid,
-        .pid = peer.pid,
-        .global = lock_request.global,
-        .acquired_at = nowSeconds(io),
-    };
-
-    const acquired = map.tryPut(lock_name_copy, lock) catch |err| {
-        allocator.free(lock_name_copy);
-        allocator.free(command_copy);
-        return err;
-    };
-
-    if (acquired) {
-        log(ll.Info, "Acquired lock for name '{s}' (uid: {d}, pid: {d}, global: {}). Command: {s}", .{
-            lock_request.name,
-            peer.uid,
-            peer.pid,
-            lock_request.global,
-            lock_request.command,
-        });
-    } else {
-        log(ll.Info, "Lock for name '{s}' is already acquired", .{lock_name_copy});
-        // TODO: almost feel like we need manual control of the mutex from
-        // above, so that we can do a get and then a put in the same section.
-        // There is still a race condition here.
-        var existing_lock = map.getPtr(lock_name_copy) orelse {
-            log(ll.Error, "Lock for name '{s}' was removed before we could add a waiter", .{lock_name_copy});
-            return error.LockAlreadyAcquired;
-        };
-
-        // TODO: lock_name_copy is never freed on this path, and on the
-        // busy/timeout paths below command_copy leaks too.
         if (lock_request.nonblock) {
+            map.unlock();
             const busy_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Busy).toJson(allocator);
             defer allocator.free(busy_response);
             try nlock.writeLine(writer, busy_response);
             return false;
         }
+
+        const command_copy = allocator.dupe(u8, lock_request.command) catch |err| {
+            map.unlock();
+            return err;
+        };
 
         var waiter = nlock.Waiter{
             .event = .unset,
@@ -398,9 +364,10 @@ fn handleAcquireLockRequest(
         // Queue up the command to be executed when the acquired lock is
         // released
         existing_lock.waiters.append(&waiter.node);
+        map.unlock();
 
         if (lock_request.timeout) |timeout_s| {
-            log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_name_copy, timeout_s });
+            log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_request.name, timeout_s });
             // TODO: This is not a safe type cast. We should use a safe cast or
             // check the value before casting.
             const timeout = std.Io.Timeout{ .duration = .{
@@ -414,32 +381,102 @@ fn handleAcquireLockRequest(
             // error to the client.
             waiter.event.waitTimeout(io, timeout) catch |err| switch (err) {
                 error.Timeout => {
-                    log(ll.Info, "Timeout while waiting for lock '{s}' to be released", .{lock_name_copy});
-                    // Remove the waiter from the queue since it timed out
-                    existing_lock.waiters.remove(&waiter.node);
-                    const timeout_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Timeout).toJson(allocator);
-                    defer allocator.free(timeout_response);
-                    try nlock.writeLine(writer, timeout_response);
-                    return error.Timeout;
+                    log(ll.Info, "Timeout while waiting for lock '{s}' to be released", .{lock_request.name});
+                    map.lock();
+                    if (!waiter.event.isSet()) {
+                        if (map.map.getPtr(lock_request.name)) |curr_lock| {
+                            curr_lock.waiters.remove(&waiter.node);
+                        }
+                        map.unlock();
+                        allocator.free(command_copy);
+                        const timeout_response = try nlock.LockResponse.init(nlock.LockResponseStatus.Timeout).toJson(allocator);
+                        defer allocator.free(timeout_response);
+                        try nlock.writeLine(writer, timeout_response);
+                        return error.Timeout;
+                    }
+                    map.unlock();
                 },
-                else => return err,
+                else => {
+                    map.lock();
+                    if (!waiter.event.isSet()) {
+                        if (map.map.getPtr(lock_request.name)) |curr_lock| {
+                            curr_lock.waiters.remove(&waiter.node);
+                        }
+                        map.unlock();
+                        allocator.free(command_copy);
+                    } else {
+                        map.unlock();
+                        _ = releaseLock(io, allocator, map, lock_request.name);
+                    }
+                    return err;
+                },
             };
         } else {
             // Wait for the lock to be released. This does not happen until the
             // client sends a release lock request, which will signal this waiter.
-            log(ll.Debug, "Waiting for lock '{s}' to be released without timeout", .{lock_name_copy});
-            try waiter.event.wait(io);
+            log(ll.Debug, "Waiting for lock '{s}' to be released without timeout", .{lock_request.name});
+            waiter.event.wait(io) catch |err| {
+                map.lock();
+                if (!waiter.event.isSet()) {
+                    if (map.map.getPtr(lock_request.name)) |curr_lock| {
+                        curr_lock.waiters.remove(&waiter.node);
+                    }
+                    map.unlock();
+                    allocator.free(command_copy);
+                } else {
+                    map.unlock();
+                    _ = releaseLock(io, allocator, map, lock_request.name);
+                }
+                return err;
+            };
         }
+    } else {
+        // The map owns copies of both the name and the command: `lock_request`
+        // slices point into this connection's read buffer, which is reused by the
+        // next read and invalid once the connection ends.
+        const lock_name_copy = allocator.dupe(u8, lock_request.name) catch |err| {
+            map.unlock();
+            return err;
+        };
+        errdefer allocator.free(lock_name_copy);
 
-        log(ll.Debug, "Waiting for lock '{s}' to be released", .{lock_name_copy});
-        try waiter.event.wait(io);
+        const command_copy = allocator.dupe(u8, lock_request.command) catch |err| {
+            allocator.free(lock_name_copy);
+            map.unlock();
+            return err;
+        };
+        errdefer allocator.free(command_copy);
+
+        const lock = nlock.Lock{
+            .command = command_copy,
+            .uid = peer.uid,
+            .pid = peer.pid,
+            .global = lock_request.global,
+            .acquired_at = nowSeconds(io),
+        };
+
+        map.map.put(lock_name_copy, lock) catch |err| {
+            allocator.free(lock_name_copy);
+            allocator.free(command_copy);
+            map.unlock();
+            return err;
+        };
+        map.unlock();
+
+        log(ll.Info, "Acquired lock for name '{s}' (uid: {d}, pid: {d}, global: {}). Command: {s}", .{
+            lock_request.name,
+            peer.uid,
+            peer.pid,
+            lock_request.global,
+            lock_request.command,
+        });
     }
 
     // The lock is ours now. If the client cannot be told (e.g. it was killed
     // while queued), pass the lock on to the next waiter.
     errdefer _ = releaseLock(io, allocator, map, lock_request.name);
 
-    log(ll.Info, "Sending acquired response for lock {s}.", .{lock_name_copy});
+    log(ll.Info, "Sending acquired response for lock {s}.", .{lock_request.name});
     const acquired_response = try nlock.LockResponse
         .init(
             nlock.LockResponseStatus.Ok,
@@ -478,9 +515,14 @@ fn releaseLock(
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     name: []const u8,
 ) bool {
-    const lock_ptr = map.getPtr(name) orelse return false;
+    map.lock();
+    defer map.unlock();
+
+    const lock_ptr = map.map.getPtr(name) orelse return false;
     if (lock_ptr.waiters.popFirst()) |waiter_node| {
         var w: *nlock.Waiter = @fieldParentPtr("node", waiter_node);
+        // Free previous holder's command before taking ownership of the waiter's command
+        allocator.free(lock_ptr.command);
         // The lock now belongs to the waiter
         lock_ptr.command = w.command;
         lock_ptr.uid = w.uid;
@@ -489,12 +531,11 @@ fn releaseLock(
         lock_ptr.acquired_at = nowSeconds(io);
         // Signal the waiter that the lock has been released
         w.event.set(io);
-        // allocator.free(w.command); // Free the waiter's command after signaling
     } else {
         allocator.free(lock_ptr.command);
-        // TODO: this leaks the key; the map owns a copy of the name made
-        // in handleAcquireLockRequest. Use fetchRemove and free it.
-        _ = map.remove(name);
+        if (map.map.fetchRemove(name)) |kv| {
+            allocator.free(kv.key);
+        }
     }
     return true;
 }
@@ -517,8 +558,8 @@ fn handleListLocksRequest(
         lines.deinit(allocator);
     }
     {
-        map.mutex.lockUncancelable(map.io);
-        defer map.mutex.unlock(map.io);
+        map.lock();
+        defer map.unlock();
 
         var it = map.map.iterator();
         while (it.next()) |entry| {
