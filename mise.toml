@@ -2,6 +2,7 @@
 zig = "0.16.0"
 zls = "0.16.0"
 pandoc = "3.12"
+nfpm = "2.47.0"
 
 [tasks.build]
 run = "zig build"
@@ -18,9 +19,52 @@ targets=(
 )
 for target in "${targets[@]}"; do
   echo "Building $target..."
-  zig build install man -Dtarget="$target" -Doptimize=ReleaseSafe --prefix "dist/$target"
+  if [[ "$target" == *linux* ]]; then
+    zig build install man -Dtarget="$target" -Doptimize=ReleaseSafe -Dservice-bindir=/usr/bin --prefix "dist/$target"
+  else
+    zig build install man -Dtarget="$target" -Doptimize=ReleaseSafe --prefix "dist/$target"
+  fi
 done
 """
+
+[tasks."package:deb"]
+description = "Build Debian (.deb) packages for x86_64 and aarch64"
+depends = ["build:cross"]
+run = """
+set -euo pipefail
+VERSION="${NLOCK_VERSION:-$(sed -n 's/.*\\.version = "\\(.*\\)".*/\\1/p' build.zig.zon)}"
+mkdir -p dist
+for arch in amd64 arm64; do
+  target_dir="dist/x86_64-linux"
+  if [ "$arch" = "arm64" ]; then
+    target_dir="dist/aarch64-linux"
+  fi
+  echo "Packaging deb for $arch (version $VERSION)..."
+  ARCH="$arch" VERSION="$VERSION" TARGET_DIR="$target_dir" nfpm package --config nfpm.yaml --packager deb --target dist/
+done
+"""
+
+[tasks."package:arch"]
+description = "Build Arch Linux (.pkg.tar.zst) packages for x86_64 and aarch64"
+depends = ["build:cross"]
+run = """
+set -euo pipefail
+VERSION="${NLOCK_VERSION:-$(sed -n 's/.*\\.version = "\\(.*\\)".*/\\1/p' build.zig.zon)}"
+mkdir -p dist
+for arch in amd64 arm64; do
+  target_dir="dist/x86_64-linux"
+  if [ "$arch" = "arm64" ]; then
+    target_dir="dist/aarch64-linux"
+  fi
+  echo "Packaging archlinux for $arch (version $VERSION)..."
+  ARCH="$arch" VERSION="$VERSION" TARGET_DIR="$target_dir" nfpm package --config nfpm.yaml --packager archlinux --target dist/
+done
+"""
+
+[tasks."package"]
+description = "Build Debian (.deb) and Arch Linux (.pkg.tar.zst) packages"
+depends = ["package:deb", "package:arch"]
+
 
 [tasks."test:unit"]
 run = "zig build test"

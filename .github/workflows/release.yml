@@ -88,6 +88,14 @@ jobs:
         with:
           version: "3.5"
 
+      - name: Setup nfpm
+        run: |
+          NFPM_VERSION="2.47.0"
+          curl -sfLo /tmp/nfpm.tar.gz "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          sudo tar -xz -C /usr/local/bin nfpm -f /tmp/nfpm.tar.gz
+          rm /tmp/nfpm.tar.gz
+          nfpm --version
+
       - name: Cross-build targets
         run: |
           mkdir -p staging dist
@@ -106,7 +114,11 @@ jobs:
             PREFIX="staging/${PLATFORM}"
 
             echo "=== Building target: ${TARGET} (${PLATFORM}) ==="
-            zig build install man -Dtarget="${TARGET}" -Doptimize=ReleaseSafe --prefix "${PREFIX}"
+            if [[ "${TARGET}" == *linux* ]]; then
+              zig build install man -Dtarget="${TARGET}" -Doptimize=ReleaseSafe -Dservice-bindir=/usr/bin --prefix "${PREFIX}"
+            else
+              zig build install man -Dtarget="${TARGET}" -Doptimize=ReleaseSafe --prefix "${PREFIX}"
+            fi
 
             # Copy LICENSE and README into release bundle
             cp LICENSE README.md "${PREFIX}/"
@@ -120,11 +132,27 @@ jobs:
             echo "Successfully packaged dist/${ARCHIVE_NAME}"
           done
 
+      - name: Build Debian and Arch packages
+        run: |
+          LINUX_ARCHS=(
+            "amd64:staging/linux-x86_64"
+            "arm64:staging/linux-aarch64"
+          )
+
+          for item in "${LINUX_ARCHS[@]}"; do
+            ARCH="${item%%:*}"
+            TARGET_DIR="${item##*:}"
+
+            echo "=== Packaging Debian and Arch for ${ARCH} (from ${TARGET_DIR}) ==="
+            ARCH="${ARCH}" VERSION="${VERSION}" TARGET_DIR="${TARGET_DIR}" nfpm package --config nfpm.yaml --packager deb --target dist/
+            ARCH="${ARCH}" VERSION="${VERSION}" TARGET_DIR="${TARGET_DIR}" nfpm package --config nfpm.yaml --packager archlinux --target dist/
+          done
+
       - name: Generate SHA256 checksums
         id: checksums
         run: |
           cd dist
-          sha256sum nlock-*.tar.gz > SHA256SUMS.txt
+          sha256sum nlock-*.tar.gz nlock*.deb nlock*.pkg.tar.zst > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
           echo "macos_aarch64_sha=$(sha256sum nlock-macos-aarch64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
@@ -143,6 +171,8 @@ jobs:
           generate_release_notes: true
           files: |
             dist/nlock-*.tar.gz
+            dist/nlock*.deb
+            dist/nlock*.pkg.tar.zst
             dist/SHA256SUMS.txt
 
       - name: Update Homebrew formula in erietz/homebrew-tap
