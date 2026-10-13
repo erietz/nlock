@@ -6,13 +6,55 @@ See [the man page](./docs/nlock.1.md) for the full documentation.
 
 ## Homebrew
 
-```
+```sh
 # install the tap and the formula
 brew tap erietz/tap
 brew install nlock
 
 # start the daemon automatically on login
 brew services start nlock
+```
+
+## Debian / Ubuntu
+
+Download the `.deb` package for your architecture from the
+[latest release](https://github.com/erietz/nlock/releases/latest) and install
+it with `dpkg`:
+
+```sh
+# x86_64 (amd64)
+sudo dpkg -i nlock_<version>_amd64.deb
+
+# aarch64 (arm64)
+sudo dpkg -i nlock_<version>_arm64.deb
+```
+
+After installation, enable and start the daemon as your user:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now nlockd
+```
+
+## Arch Linux
+
+Download the `.pkg.tar.zst` package for your architecture from the
+[latest release](https://github.com/erietz/nlock/releases/latest) and install
+it with `pacman`:
+
+```sh
+# x86_64
+sudo pacman -U nlock-<version>-1-x86_64.pkg.tar.zst
+
+# aarch64
+sudo pacman -U nlock-<version>-1-aarch64.pkg.tar.zst
+```
+
+After installation, enable and start the daemon as your user:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now nlockd
 ```
 
 ## From source (user installation)
@@ -28,7 +70,7 @@ To install from source:
     mise trust
     # Install the dependencies
     mise install
-    # Build and install to ~/.local as the prefined prefix
+    # Build and install to ~/.local as the predefined prefix
     mise run install
     ```
 2. Start the nlockd service:
@@ -43,6 +85,7 @@ To install from source:
 
 If you do not have `mise` installed, view the commands in `./mise.toml` and run
 them manually.
+
 # Examples
 
 Every `nlock run` that uses the same lock name waits its turn and runs in

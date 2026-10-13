@@ -1,0 +1,49 @@
+name: "nlock"
+arch: "${ARCH}"
+platform: "linux"
+version: "${VERSION}"
+section: "utils"
+priority: "optional"
+maintainer: "Ethan Rietz <ewrietz@gmail.com>"
+description: "Run commands while holding named locks"
+homepage: "https://github.com/erietz/nlock"
+license: "GPL-3.0-only"
+
+contents:
+  - src: "${TARGET_DIR}/bin/nlock"
+    dst: /usr/bin/nlock
+    file_info:
+      mode: 0755
+    expand: true
+  - src: "${TARGET_DIR}/bin/nlockd"
+    dst: /usr/bin/nlockd
+    file_info:
+      mode: 0755
+    expand: true
+  - src: "${TARGET_DIR}/share/man/man1/nlock.1"
+    dst: /usr/share/man/man1/nlock.1
+    file_info:
+      mode: 0644
+    expand: true
+  - src: "${TARGET_DIR}/share/man/man1/nlockd.1"
+    dst: /usr/share/man/man1/nlockd.1
+    file_info:
+      mode: 0644
+    expand: true
+  - src: "${TARGET_DIR}/share/systemd/user/nlockd.service"
+    dst: /usr/lib/systemd/user/nlockd.service
+    file_info:
+      mode: 0644
+    expand: true
+  - src: LICENSE
+    dst: /usr/share/licenses/nlock/LICENSE
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/nlock/copyright
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/nlock/README.md
+    file_info:
+      mode: 0644
