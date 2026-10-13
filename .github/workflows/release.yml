@@ -1,0 +1,250 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.1.0 or v0.1.0)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run (build and package without pushing tag, release, or Homebrew update)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, Release & Update Homebrew
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Normalize version
+        id: version
+        run: |
+          RAW_VERSION="${{ inputs.version }}"
+          # Strip leading 'v' if present
+          VERSION="${RAW_VERSION#v}"
+
+          # Validate semver pattern (e.g. 0.1.0 or 1.0.0-rc.1)
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "::error::Invalid version format: '$RAW_VERSION'. Expected semantic version like '0.1.0' or '1.0.0'."
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "TAG=v${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Update version in build.zig.zon
+        run: |
+          python3 -c '
+          import re, sys
+          version = sys.argv[1]
+          with open("build.zig.zon", "r") as f:
+              content = f.read()
+          new_content = re.sub(r"(\.version\s*=\s*\")[^\"]+(\")", rf"\g<1>{version}\g<2>", content)
+          with open("build.zig.zon", "w") as f:
+              f.write(new_content)
+          ' "${VERSION}"
+
+          echo "Updated build.zig.zon:"
+          git diff build.zig.zon
+
+      - name: Commit version bump and push tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add build.zig.zon
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: release v${VERSION} [skip ci]"
+            git push origin HEAD:main
+          else
+            echo "build.zig.zon was already set to ${VERSION}"
+          fi
+
+          # Create and push annotated tag
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Setup Pandoc
+        uses: pandoc/actions/setup@v1
+        with:
+          version: "3.5"
+
+      - name: Cross-build targets
+        run: |
+          mkdir -p staging dist
+
+          # Map: zig target : archive platform name
+          TARGETS=(
+            "aarch64-macos:macos-aarch64"
+            "x86_64-macos:macos-x86_64"
+            "aarch64-linux:linux-aarch64"
+            "x86_64-linux:linux-x86_64"
+          )
+
+          for item in "${TARGETS[@]}"; do
+            TARGET="${item%%:*}"
+            PLATFORM="${item##*:}"
+            PREFIX="staging/${PLATFORM}"
+
+            echo "=== Building target: ${TARGET} (${PLATFORM}) ==="
+            zig build install man -Dtarget="${TARGET}" -Doptimize=ReleaseSafe --prefix "${PREFIX}"
+
+            # Copy LICENSE and README into release bundle
+            cp LICENSE README.md "${PREFIX}/"
+
+            # Copy binaries to top-level of archive for direct execution and Homebrew formula installation
+            cp "${PREFIX}"/bin/* "${PREFIX}/"
+
+            # Create archive
+            ARCHIVE_NAME="nlock-${PLATFORM}.tar.gz"
+            tar -czf "dist/${ARCHIVE_NAME}" -C "${PREFIX}" .
+            echo "Successfully packaged dist/${ARCHIVE_NAME}"
+          done
+
+      - name: Generate SHA256 checksums
+        id: checksums
+        run: |
+          cd dist
+          sha256sum nlock-*.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+          echo "macos_aarch64_sha=$(sha256sum nlock-macos-aarch64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "macos_x86_64_sha=$(sha256sum nlock-macos-x86_64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_aarch64_sha=$(sha256sum nlock-linux-aarch64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_x86_64_sha=$(sha256sum nlock-linux-x86_64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/nlock-*.tar.gz
+            dist/SHA256SUMS.txt
+
+      - name: Update Homebrew formula in erietz/homebrew-tap
+        if: ${{ !inputs.dry_run }}
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          MACOS_AARCH64_SHA: ${{ steps.checksums.outputs.macos_aarch64_sha }}
+          MACOS_X86_64_SHA: ${{ steps.checksums.outputs.macos_x86_64_sha }}
+          LINUX_AARCH64_SHA: ${{ steps.checksums.outputs.linux_aarch64_sha }}
+          LINUX_X86_64_SHA: ${{ steps.checksums.outputs.linux_x86_64_sha }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::Secret HOMEBREW_TAP_TOKEN is not configured. Skipping erietz/homebrew-tap update."
+            echo "To enable automated Homebrew updates, add a Personal Access Token with repo scope as HOMEBREW_TAP_TOKEN in repository secrets."
+            exit 0
+          fi
+
+          echo "Cloning erietz/homebrew-tap..."
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/erietz/homebrew-tap.git" tap-repo
+          mkdir -p tap-repo/Formula
+
+          python3 -c '
+          import os
+
+          version = os.environ["VERSION"]
+          macos_aarch64_sha = os.environ["MACOS_AARCH64_SHA"]
+          macos_x86_64_sha = os.environ["MACOS_X86_64_SHA"]
+          linux_aarch64_sha = os.environ["LINUX_AARCH64_SHA"]
+          linux_x86_64_sha = os.environ["LINUX_X86_64_SHA"]
+
+          formula = f"""class Nlock < Formula
+            desc "Run commands while holding named locks"
+            homepage "https://github.com/erietz/nlock"
+            version "{version}"
+            license "GPL-3.0-only"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/erietz/nlock/releases/download/v{version}/nlock-macos-aarch64.tar.gz"
+                sha256 "{macos_aarch64_sha}"
+              elsif Hardware::CPU.intel?
+                url "https://github.com/erietz/nlock/releases/download/v{version}/nlock-macos-x86_64.tar.gz"
+                sha256 "{macos_x86_64_sha}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/erietz/nlock/releases/download/v{version}/nlock-linux-aarch64.tar.gz"
+                sha256 "{linux_aarch64_sha}"
+              elsif Hardware::CPU.intel?
+                url "https://github.com/erietz/nlock/releases/download/v{version}/nlock-linux-x86_64.tar.gz"
+                sha256 "{linux_x86_64_sha}"
+              end
+            end
+
+            def install
+              bin.install "nlock"
+              bin.install "nlockd"
+              man1.install "share/man/man1/nlock.1" if File.exist?("share/man/man1/nlock.1")
+              man1.install "share/man/man1/nlockd.1" if File.exist?("share/man/man1/nlockd.1")
+              if OS.mac?
+                (share/"nlock/launchd").install "share/nlock/launchd/com.erietz.nlockd.plist" if File.exist?("share/nlock/launchd/com.erietz.nlockd.plist")
+              elsif OS.linux?
+                (share/"systemd/user").install "share/systemd/user/nlockd.service" if File.exist?("share/systemd/user/nlockd.service")
+              end
+            end
+
+            service do
+              run [opt_bin/"nlockd"]
+              keep_alive true
+              log_path var/"log/nlockd.log"
+              error_log_path var/"log/nlockd.log"
+              environment_variables NLOCK_LOG_LEVEL: "Debug"
+            end
+
+            test do
+              output = shell_output("#{bin}/nlock 2>&1", 1)
+              assert_match "Usage: nlock", output
+            end
+          end
+          """
+
+          # Strip indentation
+          lines = formula.strip().splitlines()
+          processed = [line[10:] if line.startswith("          ") else line for line in lines]
+          clean_formula = "\n".join(processed) + "\n"
+
+          with open("tap-repo/Formula/nlock.rb", "w") as f:
+              f.write(clean_formula)
+          '
+
+          cd tap-repo
+          git add Formula/nlock.rb
+          if git diff --staged --quiet; then
+            echo "Formula/nlock.rb is already up to date."
+          else
+            git commit -m "Update nlock to v${VERSION}"
+            git push origin main
+            echo "Successfully updated Formula/nlock.rb in erietz/homebrew-tap!"
+          fi
