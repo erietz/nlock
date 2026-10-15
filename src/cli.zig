@@ -7,14 +7,18 @@ pub const USAGE =
     \\
 ;
 
+pub const UsageError = error{
+    InvalidArguments,
+};
+
 pub const Command = union(enum) {
     run: RunOptions,
     list: ListOptions,
     version,
 
-    pub fn parseArgs(args: []const [:0]const u8) !Command {
+    pub fn parseArgs(args: []const [:0]const u8) UsageError!Command {
         if (args.len < 2) {
-            return error.InvalidArguments; // No subcommand provided
+            return UsageError.InvalidArguments; // No subcommand provided
         }
 
         // If --version appears anywhere in the arguments, treat it as a
@@ -34,7 +38,7 @@ pub const Command = union(enum) {
             return .{ .list = try ListOptions.parseArgs(rest) };
         }
 
-        return error.InvalidArguments; // Unknown subcommand
+        return UsageError.InvalidArguments; // Unknown subcommand
     }
 };
 

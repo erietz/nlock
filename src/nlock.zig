@@ -11,63 +11,70 @@ const Context = struct {
     allocator: std.mem.Allocator,
 };
 
+const RunLockedError = error{
+    LockAlreadyAcquired,
+    LockAcquireTimeout,
+    LockReleaseFailed,
+};
+
 pub fn main(init: std.process.Init) void {
     const status = run(init) catch |err| {
-        switch (err) {
-            error.InvalidArguments => {
-                std.debug.print("{s}", .{nlock.cli.USAGE});
-            },
-            error.LockAlreadyAcquired => {
-                std.debug.print("Lock is already acquired by another process.\n", .{});
-            },
-            error.LockServerNotRunning => {
-                std.debug.print("Lock server is not running. Please start the lock server first.\n", .{});
-            },
-            error.UntrustedLockServer => {
-                std.debug.print("Lock server socket belongs to another user. Refusing to use it.\n", .{});
-            },
-            error.LockAcquireTimeout => {
-                std.debug.print("Failed to acquire lock within the specified timeout.\n", .{});
-            },
-            error.LockReleaseFailed => {
-                std.debug.print("Failed to release lock. Please check the lock server logs for more details.\n", .{});
-            },
-            else => {
-                std.debug.print("An unexpected error occurred: {s}\n", .{@errorName(err)});
-            },
-        }
-        std.process.exit(1);
+        std.debug.print("An unexpected error occurred: {s}\n", .{@errorName(err)});
+        nlock.SysExits.software.exit();
     };
     std.process.exit(status);
 }
 
 /// Returns the exit status for nlock: the command's for `run`, 0 for `list`.
 pub fn run(init: std.process.Init) !u8 {
-    const args = try init.minimal.args.toSlice(init.gpa);
-    defer init.gpa.free(args);
-    const command = try nlock.cli.Command.parseArgs(args);
-
     nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
     nlock.printer.init(init.io);
+
+    const args = init.minimal.args.toSlice(init.gpa) catch nlock.SysExits.oserr.exit();
+    defer init.gpa.free(args);
+    const command = nlock.cli.Command.parseArgs(args) catch |err| switch (err) {
+        nlock.cli.UsageError.InvalidArguments => {
+            nlock.printer.eprint("{s}", .{nlock.cli.USAGE}) catch nlock.SysExits.oserr.exit();
+            nlock.SysExits.usage.exit();
+        },
+    };
 
     // No need to connect to the daemon for `version`, so do it first to avoid
     // unnecessary errors if the daemon is not running.
     if (command == .version) {
-        try printVersion();
-        return 0;
+        printVersion() catch nlock.SysExits.oserr.exit();
+        nlock.SysExits.ok.exit();
     }
 
     const socket_path = try nlock.getSocketPath(init.gpa, init.environ_map);
     defer init.gpa.free(socket_path);
     log(ll.Debug, "Connecting to lock server at {s}", .{socket_path});
 
-    const address = try std.Io.net.UnixAddress.init(socket_path);
+    const address = std.Io.net.UnixAddress.init(socket_path) catch nlock.SysExits.osfile.exit();
     const stream = address.connect(init.io) catch |err| {
-        log(ll.Error, "Failed to connect to lock server: {s}", .{@errorName(err)});
-        return error.LockServerNotRunning;
+        nlock.printer.eprint(
+            "nlockd server is not running or cannot be reached at {s}: {s}\n",
+            .{ socket_path, @errorName(err) },
+        ) catch nlock.SysExits.oserr.exit();
+        nlock.SysExits.unavailable.exit();
     };
     defer stream.close(init.io);
-    try verifyServer(stream);
+    verifyServer(stream) catch |err| switch (err) {
+        error.UntrustedLockServer => {
+            nlock.printer.eprint(
+                "Lock server socket belongs to another user. Refusing to use it.\n",
+                .{},
+            ) catch nlock.SysExits.oserr.exit();
+            nlock.SysExits.unavailable.exit();
+        },
+        else => {
+            nlock.printer.eprint(
+                "Failed to verify lock server identity: {s}\n",
+                .{@errorName(err)},
+            ) catch nlock.SysExits.oserr.exit();
+            nlock.SysExits.software.exit();
+        },
+    };
 
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(init.io, &write_buffer);
@@ -83,13 +90,38 @@ pub fn run(init: std.process.Init) !u8 {
     };
 
     switch (command) {
-        .run => |options| return runLocked(ctx, options),
+        .run => |options| return runLocked(ctx, options) catch |err| switch (err) {
+            RunLockedError.LockAlreadyAcquired => {
+                nlock.printer.eprint(
+                    "Lock is already acquired by another process.\n",
+                    .{},
+                ) catch nlock.SysExits.oserr.exit();
+                nlock.SysExits.tempfail.exit();
+            },
+            RunLockedError.LockAcquireTimeout => {
+                nlock.printer.eprint(
+                    "Failed to acquire lock within the specified timeout.\n",
+                    .{},
+                ) catch nlock.SysExits.oserr.exit();
+                nlock.SysExits.tempfail.exit();
+            },
+            RunLockedError.LockReleaseFailed => {
+                nlock.printer.eprint(
+                    "Failed to release lock. Please check the lock server logs for more details.\n",
+                    .{},
+                ) catch nlock.SysExits.oserr.exit();
+                nlock.SysExits.software.exit();
+            },
+            else => {
+                return err;
+            },
+        },
         .list => |options| {
             try runList(ctx, options);
             return 0;
         },
         .version => {
-            try printVersion();
+            printVersion() catch nlock.SysExits.oserr.exit();
             return 0;
         },
     }
@@ -141,15 +173,15 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
                 },
                 else => {
                     log(ll.Error, "Failed to release lock. Status: {d}", .{release_status});
-                    return error.LockReleaseFailed;
+                    return RunLockedError.LockReleaseFailed;
                 },
             }
         },
         nlock.LockResponseStatus.Busy => {
-            return error.LockAlreadyAcquired;
+            return RunLockedError.LockAlreadyAcquired;
         },
         nlock.LockResponseStatus.Timeout => {
-            return error.LockAcquireTimeout;
+            return RunLockedError.LockAcquireTimeout;
         },
     }
 }

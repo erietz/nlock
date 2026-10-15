@@ -161,7 +161,7 @@ test "list rejects conflicting output options" {
     const result = try daemon.client(gpa, io, &.{ "list", "--json", "-q" });
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
-    try std.testing.expectEqual(Term{ .exited = 1 }, result.term);
+    try std.testing.expectEqual(Term{ .exited = 64 }, result.term);
 }
 
 test "three different locks can be held at the same time and listed" {
@@ -318,7 +318,7 @@ test "run rejects lock names containing whitespace" {
     const result = try daemon.client(gpa, io, &.{ "run", "my lock", "--", "true" });
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
-    try std.testing.expectEqual(Term{ .exited = 1 }, result.term);
+    try std.testing.expectEqual(Term{ .exited = 64 }, result.term);
 }
 
 test "lock is released when the holding client is killed" {
@@ -510,7 +510,7 @@ test "client fails when no daemon is running" {
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
 
-    try std.testing.expectEqual(Term{ .exited = 1 }, result.term);
+    try std.testing.expectEqual(Term{ .exited = 69 }, result.term);
 }
 
 fn expectFileContents(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, expected: []const u8) !void {
