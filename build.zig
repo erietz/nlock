@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("nlock", .{
+    const nlock_mod = b.addModule("nlock", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
@@ -43,6 +43,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // Add the build.zig.zon file as a module so that we can access the version
+    // string from it.
+    const build_zig_zon_mod = b.addModule("build_zig_zon", .{
+        .root_source_file = b.path("build.zig.zon"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // This makes the build.zig.zon module available for import in the nlock module.
+    nlock_mod.addImport("build_zig_zon", build_zig_zon_mod);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -81,7 +91,7 @@ pub fn build(b: *std.Build) void {
                 // repeated because you are allowed to rename your imports, which
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
-                .{ .name = "nlock", .module = mod },
+                .{ .name = "nlock", .module = nlock_mod },
             },
         }),
     });
@@ -99,7 +109,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "nlock", .module = mod },
+                .{ .name = "nlock", .module = nlock_mod },
             },
         }),
     });
@@ -178,7 +188,7 @@ pub fn build(b: *std.Build) void {
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
     const mod_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = nlock_mod,
     });
 
     // A run step that will run the test executable.
@@ -221,7 +231,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "build_options", .module = integration_options.createModule() },
-                .{ .name = "nlock", .module = mod },
+                .{ .name = "nlock", .module = nlock_mod },
             },
         }),
     });

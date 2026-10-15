@@ -50,6 +50,13 @@ pub fn run(init: std.process.Init) !u8 {
     nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
     nlock.printer.init(init.io);
 
+    // No need to connect to the daemon for `version`, so do it first to avoid
+    // unnecessary errors if the daemon is not running.
+    if (command == .version) {
+        try printVersion();
+        return 0;
+    }
+
     const socket_path = try nlock.getSocketPath(init.gpa, init.environ_map);
     defer init.gpa.free(socket_path);
     log(ll.Debug, "Connecting to lock server at {s}", .{socket_path});
@@ -81,7 +88,15 @@ pub fn run(init: std.process.Init) !u8 {
             try runList(ctx, options);
             return 0;
         },
+        .version => {
+            try printVersion();
+            return 0;
+        },
     }
+}
+
+fn printVersion() !void {
+    try nlock.printer.print("nlock {s}\n", .{nlock.version()});
 }
 
 /// Refuses to talk to a daemon run by another user (other than root), in case
