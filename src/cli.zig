@@ -169,25 +169,25 @@ test "Command.parseArgs without subcommand" {
 test "Command.parseArgs version" {
     const args: []const [:0]const u8 = &.{ "nlock", "--version" };
     const result = try Command.parseArgs(args);
-    try std.testing.expectEqual(.{ .version = {} }, result);
+    try std.testing.expectEqual(Command{ .version = {} }, result);
 }
 
 test "Command.parseArgs version with extra arguments" {
     const args: []const [:0]const u8 = &.{ "nlock", "--version", "extra" };
     const result = try Command.parseArgs(args);
-    try std.testing.expectEqual(.{ .version = {} }, result);
+    try std.testing.expectEqual(Command{ .version = {} }, result);
 }
 
 test "Command.parseArgs version with run subcommand" {
     const args: []const [:0]const u8 = &.{ "nlock", "run", "--version" };
     const result = try Command.parseArgs(args);
-    try std.testing.expectEqual(.{ .version = {} }, result);
+    try std.testing.expectEqual(Command{ .version = {} }, result);
 }
 
 test "Command.parseArgs version with list subcommand" {
     const args: []const [:0]const u8 = &.{ "nlock", "list", "--version" };
     const result = try Command.parseArgs(args);
-    try std.testing.expectEqual(.{ .version = {} }, result);
+    try std.testing.expectEqual(Command{ .version = {} }, result);
 }
 
 test "Command.parseArgs list" {
