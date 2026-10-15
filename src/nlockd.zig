@@ -355,6 +355,28 @@ fn handleAcquireLockRequest(
             return err;
         };
 
+        // Tell the client who it is waiting for. Serialized now, while the
+        // holder cannot change, but sent after releasing the mutex.
+        const ahead = existing_lock.waiters.len();
+        const queued_response = (nlock.LockResponse{
+            .status = nlock.LockResponseStatus.Queued,
+            .holder = .{
+                .name = lock_request.name,
+                .uid = existing_lock.uid,
+                .pid = existing_lock.pid,
+                .global = existing_lock.global,
+                .waiters = ahead + 1,
+                .acquired_at = existing_lock.acquired_at,
+                .command = existing_lock.command,
+            },
+            .ahead = ahead,
+        }).toJson(allocator) catch |err| {
+            allocator.free(command_copy);
+            map.unlock();
+            return err;
+        };
+        defer allocator.free(queued_response);
+
         var waiter = nlock.Waiter{
             .event = .unset,
             .command = command_copy,
@@ -366,6 +388,11 @@ fn handleAcquireLockRequest(
         // released
         existing_lock.waiters.append(&waiter.node);
         map.unlock();
+
+        nlock.writeLine(writer, queued_response) catch |err| {
+            abandonWait(io, allocator, map, lock_request.name, &waiter);
+            return err;
+        };
 
         if (lock_request.timeout) |timeout_s| {
             log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_request.name, timeout_s });
@@ -398,17 +425,7 @@ fn handleAcquireLockRequest(
                     map.unlock();
                 },
                 else => {
-                    map.lock();
-                    if (!waiter.event.isSet()) {
-                        if (map.map.getPtr(lock_request.name)) |curr_lock| {
-                            curr_lock.waiters.remove(&waiter.node);
-                        }
-                        map.unlock();
-                        allocator.free(command_copy);
-                    } else {
-                        map.unlock();
-                        _ = releaseLock(io, allocator, map, lock_request.name);
-                    }
+                    abandonWait(io, allocator, map, lock_request.name, &waiter);
                     return err;
                 },
             };
@@ -417,17 +434,7 @@ fn handleAcquireLockRequest(
             // client sends a release lock request, which will signal this waiter.
             log(ll.Debug, "Waiting for lock '{s}' to be released without timeout", .{lock_request.name});
             waiter.event.wait(io) catch |err| {
-                map.lock();
-                if (!waiter.event.isSet()) {
-                    if (map.map.getPtr(lock_request.name)) |curr_lock| {
-                        curr_lock.waiters.remove(&waiter.node);
-                    }
-                    map.unlock();
-                    allocator.free(command_copy);
-                } else {
-                    map.unlock();
-                    _ = releaseLock(io, allocator, map, lock_request.name);
-                }
+                abandonWait(io, allocator, map, lock_request.name, &waiter);
                 return err;
             };
         }
@@ -485,6 +492,29 @@ fn handleAcquireLockRequest(
     defer allocator.free(acquired_response);
     try nlock.writeLine(writer, acquired_response);
     return true;
+}
+
+/// Cleans up after a queued client that stopped waiting because of an error
+/// (e.g. it disconnected). If the lock has not reached it yet, it leaves the
+/// queue; if it has, the lock is passed on to the next waiter.
+fn abandonWait(
+    io: Io,
+    allocator: std.mem.Allocator,
+    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    name: []const u8,
+    waiter: *nlock.Waiter,
+) void {
+    map.lock();
+    if (!waiter.event.isSet()) {
+        if (map.map.getPtr(name)) |curr_lock| {
+            curr_lock.waiters.remove(&waiter.node);
+        }
+        map.unlock();
+        allocator.free(waiter.command);
+    } else {
+        map.unlock();
+        _ = releaseLock(io, allocator, map, name);
+    }
 }
 
 fn handleReleaseLockRequest(

@@ -144,11 +144,16 @@ fn verifyServer(stream: std.Io.net.Stream) !void {
 
 /// Runs the command under the lock and returns its exit status.
 pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
+    // Only explain a wait to a person: scripts and cron jobs would just get
+    // noise on stderr.
+    const report_queued = Io.File.stderr().isTty(ctx.io) catch false;
     const acquire_status = try acquireLock(
+        ctx.io,
         ctx.allocator,
         ctx.writer,
         ctx.reader,
         options,
+        report_queued,
     );
 
     switch (acquire_status) {
@@ -183,6 +188,8 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
         nlock.LockResponseStatus.Timeout => {
             return RunLockedError.LockAcquireTimeout;
         },
+        // acquireLock reads past Queued to the final status.
+        nlock.LockResponseStatus.Queued => unreachable,
     }
 }
 
@@ -439,11 +446,16 @@ test "formatLockInfoTable prints only the header when no locks are held" {
     try std.testing.expectEqualStrings("", try formatLockInfoTable(arena, &.{}, false, 0));
 }
 
+/// Requests the lock and waits for the daemon's answer: Ok, Busy or Timeout.
+/// If the lock is held by someone else, first prints who holds it to stderr
+/// when `report_queued` is set.
 pub fn acquireLock(
+    io: Io,
     allocator: std.mem.Allocator,
     writer: *Io.Writer,
     reader: *Io.Reader,
     options: nlock.cli.RunOptions,
+    report_queued: bool,
 ) !nlock.LockResponseStatus {
     const command_str = std.mem.join(allocator, " ", options.command) catch {
         log(ll.Error, "Failed to join command arguments", .{});
@@ -464,10 +476,69 @@ pub fn acquireLock(
 
     try nlock.writeLine(writer, message);
 
-    const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    log(ll.Debug, "Received lock response: {s}", .{response_message});
-    const lock_response = try nlock.LockResponse.fromJson(response_message, allocator);
-    return lock_response.status;
+    while (true) {
+        const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
+        log(ll.Debug, "Received lock response: {s}", .{response_message});
+        var lock_response = try nlock.LockResponse.fromJson(response_message, allocator);
+        defer lock_response.deinit(allocator);
+
+        if (lock_response.status != .Queued) return lock_response.status;
+        if (!report_queued) continue;
+        const holder = lock_response.holder orelse continue;
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const queued_message = try formatQueuedMessage(
+            arena_state.allocator(),
+            holder,
+            lock_response.ahead orelse 0,
+            nowSeconds(io),
+        );
+        nlock.printer.eprint("{s}", .{queued_message}) catch {};
+    }
+}
+
+/// The line printed while waiting for a lock held by someone else, e.g.
+/// `nlock: waiting for 'db' — held by alice (pid 4242) for 02:13: ./migrate --up (2 ahead of you)`
+fn formatQueuedMessage(
+    allocator: std.mem.Allocator,
+    holder: nlock.LockInfo,
+    ahead: usize,
+    now: i64,
+) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(allocator, "nlock: waiting for '");
+    try appendEscaped(allocator, &out, holder.name);
+    try out.print(allocator, "' — held by {s}", .{try userNameAlloc(allocator, holder.uid)});
+    if (holder.pid > 0) try out.print(allocator, " (pid {d})", .{holder.pid});
+    try out.print(allocator, " for {s}: ", .{try formatElapsed(allocator, now - holder.acquired_at)});
+    try appendEscaped(allocator, &out, holder.command);
+    if (ahead == 0) {
+        try out.appendSlice(allocator, " (next in line)\n");
+    } else {
+        try out.print(allocator, " ({d} ahead of you)\n", .{ahead});
+    }
+    return out.items;
+}
+
+test "formatQueuedMessage" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const holder: nlock.LockInfo = .{ .name = "db", .uid = 4000000000, .pid = 4242, .global = false, .waiters = 3, .acquired_at = 1000, .command = "./migrate --up" };
+    try std.testing.expectEqualStrings(
+        "nlock: waiting for 'db' — held by 4000000000 (pid 4242) for 02:13: ./migrate --up (2 ahead of you)\n",
+        try formatQueuedMessage(arena, holder, 2, 1133),
+    );
+
+    var unknown_pid = holder;
+    unknown_pid.pid = 0;
+    unknown_pid.command = "sh -c 'a\nb'";
+    try std.testing.expectEqualStrings(
+        "nlock: waiting for 'db' — held by 4000000000 for 00:00: sh -c 'a\\nb' (next in line)\n",
+        try formatQueuedMessage(arena, unknown_pid, 0, 1000),
+    );
 }
 
 /// Releases the lock with the given name. Returns the status of the release

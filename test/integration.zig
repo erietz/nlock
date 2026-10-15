@@ -495,6 +495,57 @@ test "a client cannot release a lock it does not hold" {
     try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
 }
 
+test "a queued client is told who holds the lock before it waits" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const go_path = try daemon.tmpPath(gpa, "go");
+    defer gpa.free(go_path);
+    defer daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" }) catch {};
+    const script = try std.fmt.allocPrint(gpa, "while [ ! -f {s} ]; do sleep 0.01; done", .{go_path});
+    defer gpa.free(script);
+
+    var holder = try daemon.spawnClient(gpa, io, &.{ "run", "db", "--", "sh", "-c", script });
+    var holder_done = false;
+    defer if (!holder_done) holder.kill(io);
+    try waitForListOutput(gpa, io, daemon, &.{ "list", "-q" }, "db\n");
+
+    const address = try std.Io.net.UnixAddress.init(daemon.socket_path);
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    var read_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buffer);
+    var write_buffer: [1024]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+
+    const request = try nlock.LockRequest.init(.AcquireLock, "db", false, false, null, "true").toJson(gpa);
+    defer gpa.free(request);
+    try nlock.writeLine(&writer.interface, request);
+
+    var queued = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
+    defer queued.deinit(gpa);
+    try std.testing.expectEqual(nlock.LockResponseStatus.Queued, queued.status);
+    try std.testing.expectEqual(0, queued.ahead);
+    const info = queued.holder.?;
+    try std.testing.expectEqualStrings("db", info.name);
+    try std.testing.expectEqual(std.c.getuid(), info.uid);
+    try std.testing.expectEqual(holder.id.?, info.pid);
+    const expected_command = try std.fmt.allocPrint(gpa, "sh -c {s}", .{script});
+    defer gpa.free(expected_command);
+    try std.testing.expectEqualStrings(expected_command, info.command);
+
+    // The lock is granted once the holder finishes.
+    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
+    holder_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
+    var acquired = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
+    defer acquired.deinit(gpa);
+    try std.testing.expectEqual(nlock.LockResponseStatus.Ok, acquired.status);
+}
+
 test "client fails when no daemon is running" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
