@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const Io = std.Io;
+const build_zig_zon = @import("build_zig_zon");
 const protocol = @import("protocol.zig");
 const hash = @import("hash.zig");
 const queue = @import("queue.zig");
@@ -11,6 +12,10 @@ pub const peer = @import("peer.zig");
 
 pub const SOCKET_NAME = "nlock.sock";
 pub const ENV_SOCKET_PATH = "NLOCK_SOCKET";
+
+pub fn version() []const u8 {
+    return build_zig_zon.version;
+}
 
 /// `confstr` name for the per-user temporary directory on macOS (unistd.h).
 const _CS_DARWIN_USER_TEMP_DIR = 65537;
@@ -96,11 +101,4 @@ test {
     _ = queue;
     _ = peer;
     _ = logger;
-}
-
-/// This is a documentation comment to explain the `printAnotherMessage` function below.
-///
-/// Accepting an `Io.Writer` instance is a handy way to write reusable code.
-pub fn printAnotherMessage(writer: *Io.Writer) Io.Writer.Error!void {
-    try writer.print("Run `zig build test` to run the tests.\n", .{});
 }

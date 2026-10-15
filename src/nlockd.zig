@@ -121,6 +121,7 @@ pub fn runServer(init: std.process.Init) !void {
     const socket_path_z = try gpa.dupeZ(u8, socket_path);
     defer gpa.free(socket_path_z);
     installShutdownHandlers(socket_path_z);
+    log(ll.Info, "nlockd version {s}", .{nlock.version()});
     log(ll.Info, "Server started and listening on {s}", .{socket_path});
 
     var map = nlock.ThreadSafeHashMap([]const u8, nlock.Lock).init(io, gpa);

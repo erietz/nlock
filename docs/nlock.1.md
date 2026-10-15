@@ -3,7 +3,7 @@ title: NLOCK
 section: 1
 header: User Commands
 footer: nlock
-date: October 7, 2026
+date: October 15, 2026
 ---
 
 # NAME
@@ -15,6 +15,8 @@ nlock, nlockd - run commands while holding named locks
 **nlock run** [**-g**] [**-n**] [**-t** *seconds*] *name* **\-\-** *command* [*args*...]
 
 **nlock list** [**\-\-json** | **-q**] [**-H**]
+
+**nlock \-\-version**
 
 **nlockd**
 
@@ -85,6 +87,9 @@ Locks are managed by the **nlockd** daemon, which must be running before
         line.
 
 # OPTIONS
+
+**\-\-version**
+:   Print the version and exit.
 
 ## run
 

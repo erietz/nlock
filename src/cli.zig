@@ -3,16 +3,26 @@ const std = @import("std");
 pub const USAGE =
     \\Usage: nlock run <name> [--global] -- <command> [args...]
     \\       nlock list [--json | -q] [-H]
+    \\       nlock --version
     \\
 ;
 
 pub const Command = union(enum) {
     run: RunOptions,
     list: ListOptions,
+    version,
 
     pub fn parseArgs(args: []const [:0]const u8) !Command {
         if (args.len < 2) {
             return error.InvalidArguments; // No subcommand provided
+        }
+
+        // If --version appears anywhere in the arguments, treat it as a
+        // request for version info
+        for (args) |arg| {
+            if (std.mem.eql(u8, arg, "--version")) {
+                return .{ .version = {} };
+            }
         }
 
         const subcommand = args[1];
@@ -154,6 +164,30 @@ test "Command.parseArgs without subcommand" {
     const args: []const [:0]const u8 = &.{ "nlock", "mylock", "--", "echo", "Hello" };
     const result = Command.parseArgs(args);
     try std.testing.expectError(error.InvalidArguments, result);
+}
+
+test "Command.parseArgs version" {
+    const args: []const [:0]const u8 = &.{ "nlock", "--version" };
+    const result = try Command.parseArgs(args);
+    try std.testing.expectEqual(Command{ .version = {} }, result);
+}
+
+test "Command.parseArgs version with extra arguments" {
+    const args: []const [:0]const u8 = &.{ "nlock", "--version", "extra" };
+    const result = try Command.parseArgs(args);
+    try std.testing.expectEqual(Command{ .version = {} }, result);
+}
+
+test "Command.parseArgs version with run subcommand" {
+    const args: []const [:0]const u8 = &.{ "nlock", "run", "--version" };
+    const result = try Command.parseArgs(args);
+    try std.testing.expectEqual(Command{ .version = {} }, result);
+}
+
+test "Command.parseArgs version with list subcommand" {
+    const args: []const [:0]const u8 = &.{ "nlock", "list", "--version" };
+    const result = try Command.parseArgs(args);
+    try std.testing.expectEqual(Command{ .version = {} }, result);
 }
 
 test "Command.parseArgs list" {
