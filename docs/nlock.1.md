@@ -221,13 +221,35 @@ place of the command in scripts and **&&** chains. If a signal ends
 reports it. If *command* cannot be run, **nlock** exits **127** when it is
 not found and **126** otherwise.
 
-**nlock** exits **1** if the arguments are invalid, the daemon is not
-running or is owned by another user, the lock is busy with
-**\-\-nonblock**, the **\-\-timeout** expires, or the lock could not be
-released. These errors cannot be told apart from a *command* that itself
-exits **1**.
+When **nlock** itself fails, it exits with one of the following codes from
+**sysexits**(3). A *command* that exits with one of these values cannot be
+told apart from **nlock** failing.
 
-**nlock list** exits **0** on success.
+**64** (EX_USAGE)
+:   The arguments are invalid. The usage message is printed to standard
+    error.
+
+**69** (EX_UNAVAILABLE)
+:   **nlockd** is not running, cannot be reached, or its socket belongs to
+    another user.
+
+**70** (EX_SOFTWARE)
+:   The lock could not be released, the daemon's identity could not be
+    verified, or another unexpected error occurred.
+
+**71** (EX_OSERR)
+:   An operating system error occurred, such as failing to read the
+    arguments or to write output.
+
+**72** (EX_OSFILE)
+:   The socket path is not a valid Unix domain socket address, for example
+    because it is too long.
+
+**75** (EX_TEMPFAIL)
+:   The lock is busy and **\-\-nonblock** was given, or the **\-\-timeout**
+    expired before the lock was acquired. Retrying later may succeed.
+
+**nlock list** and **nlock \-\-version** exit **0** on success.
 
 # EXAMPLES
 

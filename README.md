@@ -169,8 +169,8 @@ nlock run deploy -- "$SHELL"
 **Choose how long to wait:**
 
 ```bash
-nlock run -n deploy -- ./deploy.sh       # exit 1 right away if a deploy is running
-nlock run -t 300 deploy -- ./deploy.sh   # give up after 5 minutes
+nlock run -n deploy -- ./deploy.sh       # exit 75 right away if a deploy is running
+nlock run -t 300 deploy -- ./deploy.sh   # exit 75 after 5 minutes without the lock
 ```
 
 **See which locks are held, by whom, and who is waiting:**
