@@ -43,6 +43,15 @@ Locks are managed by the **nlockd** daemon, which must be running before
     **\-\-**. The lock is released when the command finishes, whether or not
     it succeeded.
 
+    If the lock is held by someone else and standard error is a terminal,
+    **nlock** prints who holds it before it starts waiting, for example:
+
+        nlock: waiting for 'db' — held by alice (pid 4242) for 02:13: ./migrate --up (2 ahead of you)
+
+    The elapsed time and queue position are as of when the request was
+    queued. Nothing is printed when standard error is not a terminal, so
+    scripts and cron jobs stay quiet.
+
     While the command runs, **nlock** ignores **SIGINT** and **SIGQUIT**;
     the terminal sends them to the command as well, and **nlock** releases
     the lock once the command exits. If **nlock** itself is killed, or loses

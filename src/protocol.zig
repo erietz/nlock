@@ -5,6 +5,9 @@ pub const LockResponseStatus = enum {
     Ok,
     Busy,
     Timeout,
+    /// The lock is held by someone else and the request was queued. Sent
+    /// before the client starts waiting, followed later by `Ok` or `Timeout`.
+    Queued,
 };
 
 pub const LockRequestType = enum {
@@ -228,21 +231,20 @@ pub const LockInfo = struct {
             .{},
         );
         defer parsed.deinit();
-        const lock_info = parsed.value;
+        return parsed.value.dupe(allocator);
+    }
 
-        const name = try allocator.dupe(u8, lock_info.name);
+    /// Returns a copy of the LockInfo that owns its strings, which must be
+    /// freed by the caller with `deinit`.
+    pub fn dupe(self: LockInfo, allocator: std.mem.Allocator) !LockInfo {
+        const name = try allocator.dupe(u8, self.name);
         errdefer allocator.free(name);
-        const command = try allocator.dupe(u8, lock_info.command);
+        const command = try allocator.dupe(u8, self.command);
 
-        return .{
-            .name = name,
-            .uid = lock_info.uid,
-            .pid = lock_info.pid,
-            .global = lock_info.global,
-            .waiters = lock_info.waiters,
-            .acquired_at = lock_info.acquired_at,
-            .command = command,
-        };
+        var copy = self;
+        copy.name = name;
+        copy.command = command;
+        return copy;
     }
 };
 
@@ -279,6 +281,10 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
 
 pub const LockResponse = struct {
     status: LockResponseStatus,
+    /// Who holds the lock. Only sent with `Queued`.
+    holder: ?LockInfo = null,
+    /// Number of clients queued ahead of this one. Only sent with `Queued`.
+    ahead: ?usize = null,
 
     pub fn init(status: LockResponseStatus) LockResponse {
         return LockResponse{
@@ -286,7 +292,13 @@ pub const LockResponse = struct {
         };
     }
 
-    /// Serializes the LockResponse to a JSON string.
+    /// Frees the holder, if any. Only needed for responses from `fromJson`.
+    pub fn deinit(self: *LockResponse, allocator: std.mem.Allocator) void {
+        if (self.holder) |*holder| holder.deinit(allocator);
+    }
+
+    /// Serializes the LockResponse to a JSON string. Fields that are null are
+    /// omitted, so responses other than `Queued` are just the status.
     /// Allocates memory for the JSON string, which must be freed by the caller.
     pub fn toJson(
         self: LockResponse,
@@ -295,12 +307,14 @@ pub const LockResponse = struct {
         const json = try std.json.Stringify.valueAlloc(
             allocator,
             self,
-            .{ .whitespace = .minified },
+            .{ .whitespace = .minified, .emit_null_optional_fields = false },
         );
         return json;
     }
 
     /// Deserializes a JSON string into a LockResponse.
+    /// Allocates memory for the holder, if any, which must be freed by the
+    /// caller with `deinit`.
     pub fn fromJson(
         bytes: []const u8,
         allocator: std.mem.Allocator,
@@ -313,7 +327,9 @@ pub const LockResponse = struct {
         );
         defer parsed.deinit();
 
-        return .init(parsed.value.status);
+        var response = parsed.value;
+        if (response.holder) |holder| response.holder = try holder.dupe(allocator);
+        return response;
     }
 };
 
@@ -354,6 +370,38 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trip works correctly" {
     const response = try LockResponse.fromJson(json, allocator);
 
     try std.testing.expectEqual(response.status, original.status);
+}
+
+test "LockResponse.fromJson(LockResponse.toJson()) round-trips a Queued response" {
+    const allocator = std.testing.allocator;
+    const original = LockResponse{
+        .status = LockResponseStatus.Queued,
+        .holder = .{
+            .name = "db",
+            .uid = 501,
+            .pid = 4242,
+            .global = false,
+            .waiters = 3,
+            .acquired_at = 1791331200,
+            .command = "./migrate --up",
+        },
+        .ahead = 2,
+    };
+
+    const json = try original.toJson(allocator);
+    defer allocator.free(json);
+    try std.testing.expectEqualStrings(
+        "{\"status\":\"Queued\",\"holder\":{\"name\":\"db\",\"uid\":501,\"pid\":4242,\"global\":false,\"waiters\":3,\"acquired_at\":1791331200,\"command\":\"./migrate --up\"},\"ahead\":2}",
+        json,
+    );
+
+    var response = try LockResponse.fromJson(json, allocator);
+    defer response.deinit(allocator);
+    try std.testing.expectEqual(LockResponseStatus.Queued, response.status);
+    try std.testing.expectEqual(2, response.ahead);
+    try std.testing.expectEqualStrings("db", response.holder.?.name);
+    try std.testing.expectEqual(4242, response.holder.?.pid);
+    try std.testing.expectEqualStrings("./migrate --up", response.holder.?.command);
 }
 
 pub fn writeLine(writer: *Io.Writer, message: []const u8) Io.Writer.Error!void {
