@@ -194,9 +194,14 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
 }
 
 pub fn runList(ctx: Context, options: nlock.cli.ListOptions) !void {
-    const list_message = try nlock.LockRequest
-        .init(nlock.LockRequestType.ListLocks, "", false, false, null, "")
-        .toJson(ctx.allocator);
+    const list_message = try (nlock.LockRequest{
+        .request_type = .ListLocks,
+        .name = "",
+        .global = false,
+        .nonblock = false,
+        .timeout = null,
+        .command = "",
+    }).toJson(ctx.allocator);
     defer ctx.allocator.free(list_message);
 
     try nlock.writeLine(ctx.writer, list_message);
@@ -228,23 +233,17 @@ fn nowSeconds(io: Io) i64 {
     return Io.Timestamp.now(io, .real).toSeconds();
 }
 
+/// Reads lock infos until the daemon closes the connection. Everything is
+/// allocated from `arena` and freed along with it.
 fn readLockInfos(
     reader: *Io.Reader,
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
 ) !std.ArrayList(nlock.LockInfo) {
     var lock_infos: std.ArrayList(nlock.LockInfo) = .empty;
-    errdefer {
-        for (lock_infos.items) |*lock_info| lock_info.deinit(allocator);
-        lock_infos.deinit(allocator);
-    }
     while (true) {
         const response_message = try (reader.takeDelimiter('\n')) orelse break;
         log(ll.Debug, "Received lock info: {s}", .{response_message});
-
-        var lock_info = try nlock.LockInfo.fromJson(response_message, allocator);
-        errdefer lock_info.deinit(allocator);
-
-        try lock_infos.append(allocator, lock_info);
+        try lock_infos.append(arena, try nlock.LockInfo.fromJsonLeaky(response_message, arena));
     }
     return lock_infos;
 }
@@ -462,16 +461,14 @@ pub fn acquireLock(
         return error.InvalidArguments;
     };
     defer allocator.free(command_str);
-    const message = try nlock.LockRequest
-        .init(
-            nlock.LockRequestType.AcquireLock,
-            options.name,
-            options.global,
-            options.nonblock,
-            options.timeout,
-            command_str,
-        )
-        .toJson(allocator);
+    const message = try (nlock.LockRequest{
+        .request_type = .AcquireLock,
+        .name = options.name,
+        .global = options.global,
+        .nonblock = options.nonblock,
+        .timeout = options.timeout,
+        .command = command_str,
+    }).toJson(allocator);
     defer allocator.free(message);
 
     try nlock.writeLine(writer, message);
@@ -479,8 +476,9 @@ pub fn acquireLock(
     while (true) {
         const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
         log(ll.Debug, "Received lock response: {s}", .{response_message});
-        var lock_response = try nlock.LockResponse.fromJson(response_message, allocator);
-        defer lock_response.deinit(allocator);
+        const parsed = try nlock.LockResponse.fromJson(response_message, allocator);
+        defer parsed.deinit();
+        const lock_response = parsed.value;
 
         if (lock_response.status != .Queued) return lock_response.status;
         if (!report_queued) continue;
@@ -554,16 +552,14 @@ pub fn releaseLock(
         return error.InvalidArguments;
     };
     defer allocator.free(command_str);
-    const release_message = try nlock.LockRequest
-        .init(
-            nlock.LockRequestType.ReleaseLock,
-            options.name,
-            options.global,
-            options.nonblock,
-            options.timeout,
-            command_str,
-        )
-        .toJson(allocator);
+    const release_message = try (nlock.LockRequest{
+        .request_type = .ReleaseLock,
+        .name = options.name,
+        .global = options.global,
+        .nonblock = options.nonblock,
+        .timeout = options.timeout,
+        .command = command_str,
+    }).toJson(allocator);
     defer allocator.free(release_message);
 
     try nlock.writeLine(writer, release_message);
@@ -572,7 +568,8 @@ pub fn releaseLock(
     log(ll.Debug, "Received release lock response: {s}", .{release_response_message});
 
     const release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
-    return release_response.status;
+    defer release_response.deinit();
+    return release_response.value.status;
 }
 
 /// Handler which does absolutely nothing installed while the command runs. A

@@ -480,11 +480,19 @@ test "a client cannot release a lock it does not hold" {
     var writer = stream.writer(io, &write_buffer);
 
     for ([_]nlock.LockRequestType{ .AcquireLock, .ReleaseLock }, [_][]const u8{ "mine", "victim" }) |request_type, name| {
-        const request = try nlock.LockRequest.init(request_type, name, false, false, null, "true").toJson(gpa);
+        const request = try (nlock.LockRequest{
+            .request_type = request_type,
+            .name = name,
+            .global = false,
+            .nonblock = false,
+            .timeout = null,
+            .command = "true",
+        }).toJson(gpa);
         defer gpa.free(request);
         try nlock.writeLine(&writer.interface, request);
-        const response = (try reader.interface.takeDelimiter('\n')).?;
-        try std.testing.expectEqual(nlock.LockResponseStatus.Ok, (try nlock.LockResponse.fromJson(response, gpa)).status);
+        const response = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
+        defer response.deinit();
+        try std.testing.expectEqual(nlock.LockResponseStatus.Ok, response.value.status);
     }
 
     // The daemon released "mine", the lock this connection held.
@@ -521,12 +529,20 @@ test "a queued client is told who holds the lock before it waits" {
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
 
-    const request = try nlock.LockRequest.init(.AcquireLock, "db", false, false, null, "true").toJson(gpa);
+    const request = try (nlock.LockRequest{
+        .request_type = .AcquireLock,
+        .name = "db",
+        .global = false,
+        .nonblock = false,
+        .timeout = null,
+        .command = "true",
+    }).toJson(gpa);
     defer gpa.free(request);
     try nlock.writeLine(&writer.interface, request);
 
-    var queued = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
-    defer queued.deinit(gpa);
+    const queued_parsed = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
+    defer queued_parsed.deinit();
+    const queued = queued_parsed.value;
     try std.testing.expectEqual(nlock.LockResponseStatus.Queued, queued.status);
     try std.testing.expectEqual(0, queued.ahead);
     const info = queued.holder.?;
@@ -541,8 +557,9 @@ test "a queued client is told who holds the lock before it waits" {
     try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
     holder_done = true;
     try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
-    var acquired = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
-    defer acquired.deinit(gpa);
+    const acquired_parsed = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
+    defer acquired_parsed.deinit();
+    const acquired = acquired_parsed.value;
     try std.testing.expectEqual(nlock.LockResponseStatus.Ok, acquired.status);
 }
 
