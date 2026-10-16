@@ -451,58 +451,6 @@ test "daemon replaces a stale socket left by a killed daemon" {
     try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
 }
 
-test "a client cannot release a lock it does not hold" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-
-    const daemon = try harness.Daemon.start(gpa, io);
-    defer daemon.stop(gpa, io);
-
-    const go_path = try daemon.tmpPath(gpa, "go");
-    defer gpa.free(go_path);
-    defer daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" }) catch {};
-    const script = try std.fmt.allocPrint(gpa, "while [ ! -f {s} ]; do sleep 0.01; done", .{go_path});
-    defer gpa.free(script);
-
-    var holder = try daemon.spawnClient(gpa, io, &.{ "run", "victim", "--", "sh", "-c", script });
-    var holder_done = false;
-    defer if (!holder_done) holder.kill(io);
-    try waitForListOutput(gpa, io, daemon, &.{ "list", "-q" }, "victim\n");
-
-    // Speak the protocol directly: acquire "mine", then ask to release
-    // "victim" instead.
-    const address = try std.Io.net.UnixAddress.init(daemon.socket_path);
-    const stream = try address.connect(io);
-    defer stream.close(io);
-    var read_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(io, &read_buffer);
-    var write_buffer: [1024]u8 = undefined;
-    var writer = stream.writer(io, &write_buffer);
-
-    for ([_]nlock.LockRequestType{ .AcquireLock, .ReleaseLock }, [_][]const u8{ "mine", "victim" }) |request_type, name| {
-        const request = try (nlock.LockRequest{
-            .request_type = request_type,
-            .name = name,
-            .global = false,
-            .nonblock = false,
-            .timeout = null,
-            .command = "true",
-        }).toJson(gpa);
-        defer gpa.free(request);
-        try nlock.writeLine(&writer.interface, request);
-        const response = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
-        defer response.deinit();
-        try std.testing.expectEqual(nlock.LockResponseStatus.Ok, response.value.status);
-    }
-
-    // The daemon released "mine", the lock this connection held.
-    try waitForListOutput(gpa, io, daemon, &.{ "list", "-q" }, "victim\n");
-
-    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
-    holder_done = true;
-    try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
-}
-
 test "a queued client is told who holds the lock before it waits" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -529,23 +477,21 @@ test "a queued client is told who holds the lock before it waits" {
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
 
-    const request = try (nlock.LockRequest{
-        .request_type = .AcquireLock,
+    const request = try (nlock.LockRequest{ .acquire = .{
         .name = "db",
         .global = false,
         .nonblock = false,
         .timeout = null,
         .command = "true",
-    }).toJson(gpa);
+    } }).toJson(gpa);
     defer gpa.free(request);
     try nlock.writeLine(&writer.interface, request);
 
     const queued_parsed = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
     defer queued_parsed.deinit();
-    const queued = queued_parsed.value;
-    try std.testing.expectEqual(nlock.LockResponseStatus.Queued, queued.status);
+    const queued = queued_parsed.value.queued;
     try std.testing.expectEqual(0, queued.ahead);
-    const info = queued.holder.?;
+    const info = queued.holder;
     try std.testing.expectEqualStrings("db", info.name);
     try std.testing.expectEqual(std.c.getuid(), info.uid);
     try std.testing.expectEqual(holder.id.?, info.pid);
@@ -559,8 +505,7 @@ test "a queued client is told who holds the lock before it waits" {
     try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
     const acquired_parsed = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
     defer acquired_parsed.deinit();
-    const acquired = acquired_parsed.value;
-    try std.testing.expectEqual(nlock.LockResponseStatus.Ok, acquired.status);
+    try std.testing.expectEqual(nlock.LockResponseStatus.ok, std.meta.activeTag(acquired_parsed.value));
 }
 
 test "client fails when no daemon is running" {

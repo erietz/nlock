@@ -157,22 +157,17 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
     );
 
     switch (acquire_status) {
-        nlock.LockResponseStatus.Ok => {
+        nlock.LockResponseStatus.ok => {
             log(ll.Debug, "Lock acquired successfully. Running command", .{});
             // runCommand reports its own failures as an exit status, so the
             // lock is always released below.
             const status = runCommand(ctx.io, options.command);
             log(ll.Debug, "Command finished. Releasing lock: {s}", .{options.name});
 
-            const release_status = try releaseLock(
-                ctx.allocator,
-                ctx.writer,
-                ctx.reader,
-                options,
-            );
+            const release_status = try releaseLock(ctx.allocator, ctx.writer, ctx.reader);
 
             switch (release_status) {
-                nlock.LockResponseStatus.Ok => {
+                nlock.LockResponseStatus.ok => {
                     log(ll.Debug, "Lock released successfully", .{});
                     return status;
                 },
@@ -182,26 +177,19 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
                 },
             }
         },
-        nlock.LockResponseStatus.Busy => {
+        nlock.LockResponseStatus.busy => {
             return RunLockedError.LockAlreadyAcquired;
         },
-        nlock.LockResponseStatus.Timeout => {
+        nlock.LockResponseStatus.timeout => {
             return RunLockedError.LockAcquireTimeout;
         },
-        // acquireLock reads past Queued to the final status.
-        nlock.LockResponseStatus.Queued => unreachable,
+        // acquireLock reads past queued to the final status.
+        nlock.LockResponseStatus.queued => unreachable,
     }
 }
 
 pub fn runList(ctx: Context, options: nlock.cli.ListOptions) !void {
-    const list_message = try (nlock.LockRequest{
-        .request_type = .ListLocks,
-        .name = "",
-        .global = false,
-        .nonblock = false,
-        .timeout = null,
-        .command = "",
-    }).toJson(ctx.allocator);
+    const list_message = try (nlock.LockRequest{ .list = {} }).toJson(ctx.allocator);
     defer ctx.allocator.free(list_message);
 
     try nlock.writeLine(ctx.writer, list_message);
@@ -445,7 +433,7 @@ test "formatLockInfoTable prints only the header when no locks are held" {
     try std.testing.expectEqualStrings("", try formatLockInfoTable(arena, &.{}, false, 0));
 }
 
-/// Requests the lock and waits for the daemon's answer: Ok, Busy or Timeout.
+/// Requests the lock and waits for the daemon's answer: ok, busy or timeout.
 /// If the lock is held by someone else, first prints who holds it to stderr
 /// when `report_queued` is set.
 pub fn acquireLock(
@@ -461,14 +449,13 @@ pub fn acquireLock(
         return error.InvalidArguments;
     };
     defer allocator.free(command_str);
-    const message = try (nlock.LockRequest{
-        .request_type = .AcquireLock,
+    const message = try (nlock.LockRequest{ .acquire = .{
         .name = options.name,
         .global = options.global,
         .nonblock = options.nonblock,
         .timeout = options.timeout,
         .command = command_str,
-    }).toJson(allocator);
+    } }).toJson(allocator);
     defer allocator.free(message);
 
     try nlock.writeLine(writer, message);
@@ -478,18 +465,18 @@ pub fn acquireLock(
         log(ll.Debug, "Received lock response: {s}", .{response_message});
         const parsed = try nlock.LockResponse.fromJson(response_message, allocator);
         defer parsed.deinit();
-        const lock_response = parsed.value;
-
-        if (lock_response.status != .Queued) return lock_response.status;
+        const queued = switch (parsed.value) {
+            .queued => |queued| queued,
+            else => return std.meta.activeTag(parsed.value),
+        };
         if (!report_queued) continue;
-        const holder = lock_response.holder orelse continue;
 
         var arena_state = std.heap.ArenaAllocator.init(allocator);
         defer arena_state.deinit();
         const queued_message = try formatQueuedMessage(
             arena_state.allocator(),
-            holder,
-            lock_response.ahead orelse 0,
+            queued.holder,
+            queued.ahead,
             nowSeconds(io),
         );
         nlock.printer.eprint("{s}", .{queued_message}) catch {};
@@ -539,27 +526,14 @@ test "formatQueuedMessage" {
     );
 }
 
-/// Releases the lock with the given name. Returns the status of the release
-/// operation.
+/// Releases the lock this connection holds. Returns the status of the
+/// release operation.
 pub fn releaseLock(
     allocator: std.mem.Allocator,
     writer: *Io.Writer,
     reader: *Io.Reader,
-    options: nlock.cli.RunOptions,
 ) !nlock.LockResponseStatus {
-    const command_str = std.mem.join(allocator, " ", options.command) catch {
-        log(ll.Error, "Failed to join command arguments", .{});
-        return error.InvalidArguments;
-    };
-    defer allocator.free(command_str);
-    const release_message = try (nlock.LockRequest{
-        .request_type = .ReleaseLock,
-        .name = options.name,
-        .global = options.global,
-        .nonblock = options.nonblock,
-        .timeout = options.timeout,
-        .command = command_str,
-    }).toJson(allocator);
+    const release_message = try (nlock.LockRequest{ .release = {} }).toJson(allocator);
     defer allocator.free(release_message);
 
     try nlock.writeLine(writer, release_message);
@@ -569,7 +543,7 @@ pub fn releaseLock(
 
     const release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
     defer release_response.deinit();
-    return release_response.value.status;
+    return std.meta.activeTag(release_response.value);
 }
 
 /// Handler which does absolutely nothing installed while the command runs. A

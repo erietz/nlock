@@ -225,34 +225,32 @@ fn handleConnection(
     // const req = try readRequest(&reader.interface);
     const req_parsed = try readRequest(&reader.interface, allocator);
     defer req_parsed.deinit();
-    const req = req_parsed.value;
-    switch (req.request_type) {
-        nlock.LockRequestType.AcquireLock => {
-            const holding = handleAcquireLockRequest(
-                io,
-                allocator,
-                req,
-                peer,
-                map,
-                &writer.interface,
-            ) catch |err| {
-                log(ll.Error, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
-                return err;
-            };
-            // Nonblocking request for a busy lock: nothing to release.
-            if (!holding) return;
-        },
-        nlock.LockRequestType.ListLocks => {
+    const req = switch (req_parsed.value) {
+        .acquire => |acquire| acquire,
+        .list => {
             return handleListLocksRequest(allocator, map, &writer.interface) catch |err| {
                 log(ll.Error, "Failed to handle list locks request: {s}", .{@errorName(err)});
                 return err;
             };
         },
-        else => {
-            log(ll.Error, "Received unexpected request type: {d}", .{req.request_type});
+        .release => {
+            log(ll.Error, "Received release request before acquiring a lock", .{});
             return error.UnexpectedRequestType;
         },
-    }
+    };
+    const holding = handleAcquireLockRequest(
+        io,
+        allocator,
+        req,
+        peer,
+        map,
+        &writer.interface,
+    ) catch |err| {
+        log(ll.Error, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
+        return err;
+    };
+    // Nonblocking request for a busy lock: nothing to release.
+    if (!holding) return;
 
     // If the client goes away without releasing (e.g. it was killed by a
     // signal), release the lock on its behalf so it is not held forever.
@@ -266,19 +264,10 @@ fn handleConnection(
     log(ll.Debug, "Waiting for release lock request from client", .{});
     const release_req_parsed = try readRequest(&reader.interface, allocator);
     defer release_req_parsed.deinit();
-    const release_req = release_req_parsed.value;
-    switch (release_req.request_type) {
-        nlock.LockRequestType.ReleaseLock => {
-            // A connection may only release the lock it acquired, whatever
-            // name the request carries; otherwise any client could release
-            // locks it does not hold.
-            if (!std.mem.eql(u8, release_req.name, req.name)) {
-                log(ll.Warn, "Client holding '{s}' asked to release '{s}'. Releasing '{s}'.", .{
-                    req.name,
-                    release_req.name,
-                    req.name,
-                });
-            }
+    switch (release_req_parsed.value) {
+        // A connection may only release the lock it acquired, so the request
+        // does not name one.
+        .release => {
             handleReleaseLockRequest(
                 io,
                 allocator,
@@ -291,8 +280,8 @@ fn handleConnection(
             };
             released = true;
         },
-        else => {
-            log(ll.Debug, "Received unexpected request type: {d}", .{release_req.request_type});
+        else => |release_req| {
+            log(ll.Debug, "Received unexpected request type: {s}", .{@tagName(release_req)});
             return error.UnexpectedRequestType;
         },
     }
@@ -305,10 +294,9 @@ fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !std.json.Parse
 }
 
 test "readRequest parses a valid LockRequest where command contains newlines" {
-    const message = "{\"request_type\":\"AcquireLock\",\"name\":\"my_lock\",\"global\":false,\"nonblock\":false,\"timeout\":null,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}\n";
+    const message = "{\"acquire\":{\"name\":\"my_lock\",\"global\":false,\"nonblock\":false,\"timeout\":null,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}}\n";
     const allocator = std.testing.allocator;
-    const expected_request: nlock.LockRequest = .{
-        .request_type = .AcquireLock,
+    const expected_request: nlock.LockRequest.Acquire = .{
         .name = "my_lock",
         .global = false,
         .nonblock = false,
@@ -319,9 +307,8 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     var reader = std.Io.Reader.fixed(message);
     const parsed = try readRequest(&reader, allocator);
     defer parsed.deinit();
-    const request = parsed.value;
+    const request = parsed.value.acquire;
 
-    try std.testing.expectEqual(expected_request.request_type, request.request_type);
     try std.testing.expectEqualStrings(expected_request.name, request.name);
     try std.testing.expectEqual(expected_request.global, request.global);
     try std.testing.expectEqual(expected_request.nonblock, request.nonblock);
@@ -333,7 +320,7 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
 fn handleAcquireLockRequest(
     io: Io,
     allocator: std.mem.Allocator,
-    lock_request: nlock.LockRequest,
+    lock_request: nlock.LockRequest.Acquire,
     peer: nlock.peer.Credentials,
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
     writer: *Io.Writer,
@@ -347,7 +334,7 @@ fn handleAcquireLockRequest(
 
         if (lock_request.nonblock) {
             map.unlock();
-            const busy_response = try (nlock.LockResponse{ .status = .Busy }).toJson(allocator);
+            const busy_response = try (nlock.LockResponse{ .busy = {} }).toJson(allocator);
             defer allocator.free(busy_response);
             try nlock.writeLine(writer, busy_response);
             return false;
@@ -361,8 +348,7 @@ fn handleAcquireLockRequest(
         // Tell the client who it is waiting for. Serialized now, while the
         // holder cannot change, but sent after releasing the mutex.
         const ahead = existing_lock.waiters.len();
-        const queued_response = (nlock.LockResponse{
-            .status = nlock.LockResponseStatus.Queued,
+        const queued_response = (nlock.LockResponse{ .queued = .{
             .holder = .{
                 .name = lock_request.name,
                 .uid = existing_lock.uid,
@@ -373,7 +359,7 @@ fn handleAcquireLockRequest(
                 .command = existing_lock.command,
             },
             .ahead = ahead,
-        }).toJson(allocator) catch |err| {
+        } }).toJson(allocator) catch |err| {
             allocator.free(command_copy);
             map.unlock();
             return err;
@@ -420,7 +406,7 @@ fn handleAcquireLockRequest(
                         }
                         map.unlock();
                         allocator.free(command_copy);
-                        const timeout_response = try (nlock.LockResponse{ .status = .Timeout }).toJson(allocator);
+                        const timeout_response = try (nlock.LockResponse{ .timeout = {} }).toJson(allocator);
                         defer allocator.free(timeout_response);
                         try nlock.writeLine(writer, timeout_response);
                         return error.Timeout;
@@ -488,7 +474,7 @@ fn handleAcquireLockRequest(
     errdefer _ = releaseLock(io, allocator, map, lock_request.name);
 
     log(ll.Info, "Sending acquired response for lock {s}.", .{lock_request.name});
-    const acquired_response = try (nlock.LockResponse{ .status = .Ok }).toJson(allocator);
+    const acquired_response = try (nlock.LockResponse{ .ok = {} }).toJson(allocator);
     defer allocator.free(acquired_response);
     try nlock.writeLine(writer, acquired_response);
     return true;
@@ -528,7 +514,7 @@ fn handleReleaseLockRequest(
 
     if (releaseLock(io, allocator, map, name)) {
         log(ll.Info, "Lock for name '{s}' released successfully.", .{name});
-        const lock_response = try (nlock.LockResponse{ .status = .Ok }).toJson(allocator);
+        const lock_response = try (nlock.LockResponse{ .ok = {} }).toJson(allocator);
         defer allocator.free(lock_response);
         try nlock.writeLine(writer, lock_response);
         return;
