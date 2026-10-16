@@ -16,6 +16,8 @@ nlock, nlockd - run commands while holding named locks
 
 **nlock list** [**\-\-json** | **-q**] [**-H**]
 
+**nlock** **-h** | **\-\-help**
+
 **nlock \-\-version**
 
 **nlockd**
@@ -97,8 +99,15 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
 # OPTIONS
 
+**-h**, **\-\-help**
+:   Print a summary of the commands and options to standard output and
+    exit.
+
 **\-\-version**
 :   Print the version and exit.
+
+Either option is honored anywhere among **nlock**'s own arguments, but not
+after **\-\-**, where it belongs to *command*.
 
 ## run
 
@@ -260,7 +269,7 @@ When **nlock** itself fails, it exits with one of the following codes from
 told apart from **nlock** failing.
 
 **64** (EX_USAGE)
-:   The arguments are invalid. The usage message is printed to standard
+:   The arguments are invalid. A short usage message is printed to standard
     error.
 
 **69** (EX_UNAVAILABLE)
@@ -283,7 +292,7 @@ told apart from **nlock** failing.
 :   The lock is busy and **\-\-nonblock** was given, or the **\-\-timeout**
     expired before the lock was acquired. Retrying later may succeed.
 
-**nlock list** and **nlock \-\-version** exit **0** on success.
+**nlock list**, **nlock \-\-help** and **nlock \-\-version** exit **0** on success.
 
 # EXAMPLES
 

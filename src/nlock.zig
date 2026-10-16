@@ -39,11 +39,18 @@ pub fn run(init: std.process.Init) !u8 {
         },
     };
 
-    // No need to connect to the daemon for `version`, so do it first to avoid
-    // unnecessary errors if the daemon is not running.
-    if (command == .version) {
-        printVersion() catch nlock.SysExits.oserr.exit();
-        nlock.SysExits.ok.exit();
+    // No need to connect to the daemon for `help` or `version`, so do them
+    // first to avoid unnecessary errors if the daemon is not running.
+    switch (command) {
+        .help => {
+            nlock.printer.print("{s}", .{nlock.cli.HELP}) catch nlock.SysExits.oserr.exit();
+            nlock.SysExits.ok.exit();
+        },
+        .version => {
+            printVersion() catch nlock.SysExits.oserr.exit();
+            nlock.SysExits.ok.exit();
+        },
+        .run, .list => {},
     }
 
     const socket_path = try nlock.getSocketPath(init.gpa, init.environ_map);
@@ -120,10 +127,8 @@ pub fn run(init: std.process.Init) !u8 {
             try runList(ctx, options);
             return 0;
         },
-        .version => {
-            printVersion() catch nlock.SysExits.oserr.exit();
-            return 0;
-        },
+        // Handled before connecting.
+        .help, .version => unreachable,
     }
 }
 
