@@ -19,14 +19,14 @@ brew services start nlock
 
 Download the `.deb` package for your architecture from the
 [latest release](https://github.com/erietz/nlock/releases/latest) and install
-it with `dpkg`:
+it with `apt`:
 
 ```sh
 # x86_64 (amd64)
-sudo dpkg -i nlock_<version>_amd64.deb
+sudo apt install ./nlock_<version>_amd64.deb
 
 # aarch64 (arm64)
-sudo dpkg -i nlock_<version>_arm64.deb
+sudo apt install ./nlock_<version>_arm64.deb
 ```
 
 After installation, enable and start the daemon as your user:
