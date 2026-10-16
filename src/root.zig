@@ -85,7 +85,6 @@ test "getSocketPath defaults to a per-user path" {
     }
 }
 pub const LockResponseStatus = protocol.LockResponseStatus;
-pub const LockRequestType = protocol.LockRequestType;
 pub const LockRequest = protocol.LockRequest;
 pub const LockResponse = protocol.LockResponse;
 pub const LockInfo = protocol.LockInfo;

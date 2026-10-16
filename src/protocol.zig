@@ -1,21 +1,6 @@
 const std = @import("std");
 const Io = std.Io;
 
-pub const LockResponseStatus = enum {
-    Ok,
-    Busy,
-    Timeout,
-    /// The lock is held by someone else and the request was queued. Sent
-    /// before the client starts waiting, followed later by `Ok` or `Timeout`.
-    Queued,
-};
-
-pub const LockRequestType = enum {
-    AcquireLock,
-    ReleaseLock,
-    ListLocks,
-};
-
 /// Options for parsing every protocol message.
 const parse_options: std.json.ParseOptions = .{
     // Copy strings rather than pointing into the input, which is usually a
@@ -26,13 +11,21 @@ const parse_options: std.json.ParseOptions = .{
     .ignore_unknown_fields = false,
 };
 
-pub const LockRequest = struct {
-    request_type: LockRequestType,
-    name: []const u8,
-    global: bool,
-    nonblock: bool,
-    timeout: ?u64,
-    command: []const u8,
+/// A message from the client to the daemon. Serialized as an object with a
+/// single key naming the request, e.g. `{"list":{}}`.
+pub const LockRequest = union(enum) {
+    acquire: Acquire,
+    /// Releases the lock this connection holds.
+    release,
+    list,
+
+    pub const Acquire = struct {
+        name: []const u8,
+        global: bool,
+        nonblock: bool,
+        timeout: ?u64,
+        command: []const u8,
+    };
 
     /// Serializes the LockRequest to a JSON string.
     /// Allocates memory for the JSON string, which must be freed by the caller.
@@ -40,12 +33,11 @@ pub const LockRequest = struct {
         self: LockRequest,
         allocator: std.mem.Allocator,
     ) ![]u8 {
-        const json = try std.json.Stringify.valueAlloc(
+        return std.json.Stringify.valueAlloc(
             allocator,
             self,
             .{ .whitespace = .minified },
         );
-        return json;
     }
 
     /// Deserializes a JSON string into a LockRequest. The result owns its
@@ -58,17 +50,16 @@ pub const LockRequest = struct {
     }
 };
 
-test "LockRequest.toJson serializes LockRequest correctly" {
+test "LockRequest.toJson serializes an acquire request correctly" {
     const allocator = std.testing.allocator;
-    const request = LockRequest{
-        .request_type = LockRequestType.AcquireLock,
+    const request: LockRequest = .{ .acquire = .{
         .name = "mylock",
         .global = true,
         .nonblock = false,
         .timeout = null,
         .command = "echo Hello",
-    };
-    const expected = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\"}";
+    } };
+    const expected = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\"}}";
 
     const json = try request.toJson(allocator);
     defer allocator.free(json);
@@ -76,34 +67,25 @@ test "LockRequest.toJson serializes LockRequest correctly" {
     try std.testing.expectEqualStrings(expected, json);
 }
 
-test "LockRequest.fromJson deserializes JSON into LockRequest correctly" {
+test "LockRequest.toJson serializes requests without a payload as an empty object" {
     const allocator = std.testing.allocator;
-    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\"}";
-    const expected = LockRequest{
-        .request_type = LockRequestType.AcquireLock,
-        .name = "mylock",
-        .global = true,
-        .nonblock = false,
-        .timeout = null,
-        .command = "echo Hello",
-    };
+    for ([_]LockRequest{ .release, .list }, [_][]const u8{
+        "{\"release\":{}}",
+        "{\"list\":{}}",
+    }) |request, expected| {
+        const json = try request.toJson(allocator);
+        defer allocator.free(json);
+        try std.testing.expectEqualStrings(expected, json);
 
-    const request_parsed = try LockRequest.fromJson(json, allocator);
-    defer request_parsed.deinit();
-    const request = request_parsed.value;
-
-    try std.testing.expectEqual(request.request_type, expected.request_type);
-    try std.testing.expectEqualStrings(request.name, expected.name);
-    try std.testing.expectEqual(request.global, expected.global);
-    try std.testing.expectEqual(request.nonblock, expected.nonblock);
-    try std.testing.expectEqual(request.timeout, expected.timeout);
-    try std.testing.expectEqualStrings(request.command, expected.command);
+        const parsed = try LockRequest.fromJson(json, allocator);
+        defer parsed.deinit();
+        try std.testing.expectEqual(std.meta.activeTag(request), std.meta.activeTag(parsed.value));
+    }
 }
 
 test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
     const allocator = std.testing.allocator;
-    const original = LockRequest{
-        .request_type = LockRequestType.AcquireLock,
+    const original: LockRequest.Acquire = .{
         .name = "mylock",
         .global = true,
         .nonblock = false,
@@ -111,55 +93,54 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
         .command = "echo Hello",
     };
 
-    const json = try original.toJson(allocator);
+    const json = try (LockRequest{ .acquire = original }).toJson(allocator);
     defer allocator.free(json);
 
-    const request_parsed = try LockRequest.fromJson(json, allocator);
-    defer request_parsed.deinit();
-    const request = request_parsed.value;
+    const parsed = try LockRequest.fromJson(json, allocator);
+    defer parsed.deinit();
+    const acquire = parsed.value.acquire;
 
-    try std.testing.expectEqual(request.request_type, original.request_type);
-    try std.testing.expectEqualStrings(request.name, original.name);
-    try std.testing.expectEqual(request.global, original.global);
-    try std.testing.expectEqual(request.nonblock, original.nonblock);
-    try std.testing.expectEqual(request.timeout, original.timeout);
-    try std.testing.expectEqualStrings(request.command, original.command);
+    try std.testing.expectEqualStrings(original.name, acquire.name);
+    try std.testing.expectEqual(original.global, acquire.global);
+    try std.testing.expectEqual(original.nonblock, acquire.nonblock);
+    try std.testing.expectEqual(original.timeout, acquire.timeout);
+    try std.testing.expectEqualStrings(original.command, acquire.command);
 }
 
 test "LockRequest.fromJson correctly handles colon in command" {
     const allocator = std.testing.allocator;
-    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":30,\"command\":\"echo Hello:World\"}";
-    const lock_request_parsed = try LockRequest.fromJson(json, allocator);
-    defer lock_request_parsed.deinit();
-    const lock_request = lock_request_parsed.value;
+    const json = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":30,\"command\":\"echo Hello:World\"}}";
+    const parsed = try LockRequest.fromJson(json, allocator);
+    defer parsed.deinit();
+    const acquire = parsed.value.acquire;
 
-    try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(lock_request.request_type));
-    try std.testing.expectEqualStrings("mylock", lock_request.name);
-    try std.testing.expectEqual(true, lock_request.global);
-    try std.testing.expectEqual(false, lock_request.nonblock);
-    try std.testing.expectEqual(30, lock_request.timeout.?);
-    try std.testing.expectEqualStrings("echo Hello:World", lock_request.command);
+    try std.testing.expectEqualStrings("mylock", acquire.name);
+    try std.testing.expectEqual(true, acquire.global);
+    try std.testing.expectEqual(false, acquire.nonblock);
+    try std.testing.expectEqual(30, acquire.timeout.?);
+    try std.testing.expectEqualStrings("echo Hello:World", acquire.command);
 }
 
 test "LockRequest.fromJson correctly handles newline in command" {
     const allocator = std.testing.allocator;
-    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\\nWorld\"}";
-    const lock_request_parsed = try LockRequest.fromJson(json, allocator);
-    defer lock_request_parsed.deinit();
-    const lock_request = lock_request_parsed.value;
+    const json = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\\nWorld\"}}";
+    const parsed = try LockRequest.fromJson(json, allocator);
+    defer parsed.deinit();
+    const acquire = parsed.value.acquire;
 
-    try std.testing.expectEqual(@intFromEnum(LockRequestType.AcquireLock), @intFromEnum(lock_request.request_type));
-    try std.testing.expectEqualStrings("mylock", lock_request.name);
-    try std.testing.expectEqual(true, lock_request.global);
-    try std.testing.expectEqual(false, lock_request.nonblock);
-    try std.testing.expectEqual(null, lock_request.timeout);
-    try std.testing.expectEqualStrings("echo Hello\nWorld", lock_request.command);
+    try std.testing.expectEqualStrings("mylock", acquire.name);
+    try std.testing.expectEqual(true, acquire.global);
+    try std.testing.expectEqual(false, acquire.nonblock);
+    try std.testing.expectEqual(null, acquire.timeout);
+    try std.testing.expectEqualStrings("echo Hello\nWorld", acquire.command);
 }
 
-test "LockRequest.fromJson rejects unknown fields" {
+test "LockRequest.fromJson rejects unknown fields and requests" {
     // A client and daemon of different versions should fail loudly.
-    const json = "{\"request_type\":\"AcquireLock\",\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"from_the_future\":true}";
-    try std.testing.expectError(error.UnknownField, LockRequest.fromJson(json, std.testing.allocator));
+    const unknown_field = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"from_the_future\":true}}";
+    try std.testing.expectError(error.UnknownField, LockRequest.fromJson(unknown_field, std.testing.allocator));
+    const unknown_request = "{\"FromTheFuture\":{}}";
+    try std.testing.expectError(error.UnknownField, LockRequest.fromJson(unknown_request, std.testing.allocator));
 }
 
 /// One row of the `list` response: a lock currently held, and who holds it.
@@ -240,26 +221,34 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
     try std.testing.expectEqualStrings(original.command, info.command);
 }
 
-pub const LockResponse = struct {
-    status: LockResponseStatus,
-    /// Who holds the lock. Only sent with `Queued`.
-    holder: ?LockInfo = null,
-    /// Number of clients queued ahead of this one. Only sent with `Queued`.
-    ahead: ?usize = null,
+/// A message from the daemon to the client. Serialized as an object with a
+/// single key naming the response, e.g. `{"ok":{}}`.
+pub const LockResponse = union(enum) {
+    ok,
+    busy,
+    timeout,
+    /// The lock is held by someone else and the request was queued. Sent
+    /// before the client starts waiting, followed later by `ok` or `timeout`.
+    queued: Queued,
 
-    /// Serializes the LockResponse to a JSON string. Fields that are null are
-    /// omitted, so responses other than `Queued` are just the status.
+    pub const Queued = struct {
+        /// Who holds the lock.
+        holder: LockInfo,
+        /// Number of clients queued ahead of this one.
+        ahead: usize,
+    };
+
+    /// Serializes the LockResponse to a JSON string.
     /// Allocates memory for the JSON string, which must be freed by the caller.
     pub fn toJson(
         self: LockResponse,
         allocator: std.mem.Allocator,
     ) ![]u8 {
-        const json = try std.json.Stringify.valueAlloc(
+        return std.json.Stringify.valueAlloc(
             allocator,
             self,
-            .{ .whitespace = .minified, .emit_null_optional_fields = false },
+            .{ .whitespace = .minified },
         );
-        return json;
     }
 
     /// Deserializes a JSON string into a LockResponse. The result owns its
@@ -272,12 +261,13 @@ pub const LockResponse = struct {
     }
 };
 
+/// Which kind of response the daemon sent, without its payload.
+pub const LockResponseStatus = std.meta.Tag(LockResponse);
+
 test "LockResponse.toJson serializes LockResponse correctly" {
     const allocator = std.testing.allocator;
-    const response = LockResponse{
-        .status = LockResponseStatus.Ok,
-    };
-    const expected = "{\"status\":\"Ok\"}";
+    const response: LockResponse = .ok;
+    const expected = "{\"ok\":{}}";
 
     const json = try response.toJson(allocator);
     defer allocator.free(json);
@@ -287,38 +277,17 @@ test "LockResponse.toJson serializes LockResponse correctly" {
 
 test "LockResponse.fromJson deserializes JSON into LockResponse correctly" {
     const allocator = std.testing.allocator;
-    const json = "{\"status\":\"Ok\"}";
-    const expected = LockResponse{
-        .status = LockResponseStatus.Ok,
-    };
+    const json = "{\"busy\":{}}";
 
-    const response_parsed = try LockResponse.fromJson(json, allocator);
-    defer response_parsed.deinit();
-    const response = response_parsed.value;
+    const parsed = try LockResponse.fromJson(json, allocator);
+    defer parsed.deinit();
 
-    try std.testing.expectEqual(response.status, expected.status);
+    try std.testing.expectEqual(LockResponseStatus.busy, std.meta.activeTag(parsed.value));
 }
 
-test "LockResponse.fromJson(LockResponse.toJson()) round-trip works correctly" {
+test "LockResponse.fromJson(LockResponse.toJson()) round-trips a queued response" {
     const allocator = std.testing.allocator;
-    const original = LockResponse{
-        .status = LockResponseStatus.Ok,
-    };
-
-    const json = try original.toJson(allocator);
-    defer allocator.free(json);
-
-    const response_parsed = try LockResponse.fromJson(json, allocator);
-    defer response_parsed.deinit();
-    const response = response_parsed.value;
-
-    try std.testing.expectEqual(response.status, original.status);
-}
-
-test "LockResponse.fromJson(LockResponse.toJson()) round-trips a Queued response" {
-    const allocator = std.testing.allocator;
-    const original = LockResponse{
-        .status = LockResponseStatus.Queued,
+    const original: LockResponse = .{ .queued = .{
         .holder = .{
             .name = "db",
             .uid = 501,
@@ -329,23 +298,22 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trips a Queued response
             .command = "./migrate --up",
         },
         .ahead = 2,
-    };
+    } };
 
     const json = try original.toJson(allocator);
     defer allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"status\":\"Queued\",\"holder\":{\"name\":\"db\",\"uid\":501,\"pid\":4242,\"global\":false,\"waiters\":3,\"acquired_at\":1791331200,\"command\":\"./migrate --up\"},\"ahead\":2}",
+        "{\"queued\":{\"holder\":{\"name\":\"db\",\"uid\":501,\"pid\":4242,\"global\":false,\"waiters\":3,\"acquired_at\":1791331200,\"command\":\"./migrate --up\"},\"ahead\":2}}",
         json,
     );
 
-    const response_parsed = try LockResponse.fromJson(json, allocator);
-    defer response_parsed.deinit();
-    const response = response_parsed.value;
-    try std.testing.expectEqual(LockResponseStatus.Queued, response.status);
-    try std.testing.expectEqual(2, response.ahead);
-    try std.testing.expectEqualStrings("db", response.holder.?.name);
-    try std.testing.expectEqual(4242, response.holder.?.pid);
-    try std.testing.expectEqualStrings("./migrate --up", response.holder.?.command);
+    const parsed = try LockResponse.fromJson(json, allocator);
+    defer parsed.deinit();
+    const queued = parsed.value.queued;
+    try std.testing.expectEqual(2, queued.ahead);
+    try std.testing.expectEqualStrings("db", queued.holder.name);
+    try std.testing.expectEqual(4242, queued.holder.pid);
+    try std.testing.expectEqualStrings("./migrate --up", queued.holder.command);
 }
 
 pub fn writeLine(writer: *Io.Writer, message: []const u8) Io.Writer.Error!void {
