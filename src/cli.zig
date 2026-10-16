@@ -88,6 +88,8 @@ pub const RunOptions = struct {
     command: []const [:0]const u8,
     nonblock: bool = false,
     timeout: ?u64 = null,
+    coalesce: bool = false,
+    replace: bool = false,
 
     /// Parses the arguments following `run`: `<name> [--global] -- <command> [args...]`
     pub fn parseArgs(args: []const [:0]const u8) !RunOptions {
@@ -97,6 +99,8 @@ pub const RunOptions = struct {
             .command = &.{},
             .nonblock = false,
             .timeout = null,
+            .coalesce = false,
+            .replace = false,
         };
 
         const double_dash_index = for (args, 0..) |arg, i| {
@@ -131,6 +135,10 @@ pub const RunOptions = struct {
                 };
                 options.timeout = timeout_value;
                 skip_next = true; // Skip the next argument since it's the value for --timeout
+            } else if (std.mem.eql(u8, arg, "--coalesce")) {
+                options.coalesce = true;
+            } else if (std.mem.eql(u8, arg, "--replace")) {
+                options.replace = true;
             } else if (options.name.len == 0) {
                 options.name = arg;
             } else {
@@ -140,6 +148,10 @@ pub const RunOptions = struct {
 
         if (!isValidLockName(options.name)) {
             return error.InvalidArguments; // No name, or name has whitespace or control characters
+        }
+
+        if (options.coalesce and options.replace) {
+            return error.InvalidArguments; // Conflicting flags
         }
 
         return options;
@@ -298,6 +310,36 @@ test "RunOptions.parseArgs with timeout flag" {
     try std.testing.expectEqual(30, result.timeout.?);
     const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
     try std.testing.expectEqualDeep(expected_command, result.command);
+}
+
+test "RunOptions.parseArgs with coalesce flag" {
+    const args: []const [:0]const u8 = &.{ "--coalesce", "mylock", "--", "echo", "Hello" };
+    const result = try RunOptions.parseArgs(args);
+    try std.testing.expectEqualStrings("mylock", result.name);
+    try std.testing.expectEqual(false, result.global);
+    try std.testing.expectEqual(false, result.nonblock);
+    try std.testing.expectEqual(null, result.timeout);
+    try std.testing.expectEqual(true, result.coalesce);
+    const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
+    try std.testing.expectEqualDeep(expected_command, result.command);
+}
+
+test "RunOptions.parseArgs with replace flag" {
+    const args: []const [:0]const u8 = &.{ "--replace", "mylock", "--", "echo", "Hello" };
+    const result = try RunOptions.parseArgs(args);
+    try std.testing.expectEqualStrings("mylock", result.name);
+    try std.testing.expectEqual(false, result.global);
+    try std.testing.expectEqual(false, result.nonblock);
+    try std.testing.expectEqual(null, result.timeout);
+    try std.testing.expectEqual(true, result.replace);
+    const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
+    try std.testing.expectEqualDeep(expected_command, result.command);
+}
+
+test "RunOptions.parseArgs with both coalesce and replace flags should error" {
+    const args: []const [:0]const u8 = &.{ "--coalesce", "--replace", "mylock", "--", "echo", "Hello" };
+    const result = RunOptions.parseArgs(args);
+    try std.testing.expectError(error.InvalidArguments, result);
 }
 
 test "RunOptions.parseArgs with flags after positional arguments" {

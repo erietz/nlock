@@ -2,12 +2,28 @@ const std = @import("std");
 const Io = std.Io;
 
 pub const Waiter = struct {
+    /// Set once the waiter is done waiting: either the lock was handed to it,
+    /// or `replaced_by` says it was taken out of the queue.
     event: Io.Event = .unset,
     node: std.DoublyLinkedList.Node = .{},
     command: []const u8,
     uid: u32,
     pid: i32 = 0,
     global: bool,
+    /// The client that replaced this one in the queue (`--replace`), set
+    /// before `event`. Null if the lock was handed to this waiter.
+    replaced_by: ?Replacer = null,
+
+    pub const Replacer = struct {
+        uid: u32,
+        pid: i32,
+    };
+
+    /// True if the lock was handed to this waiter. Only meaningful once
+    /// `event` is set.
+    pub fn granted(self: *const Waiter) bool {
+        return self.event.isSet() and self.replaced_by == null;
+    }
 };
 
 pub const Lock = struct {

@@ -25,6 +25,18 @@ pub const LockRequest = union(enum) {
         nonblock: bool,
         timeout: ?u64,
         command: []const u8,
+        /// What to do if the lock is held and other clients are already
+        /// waiting for it.
+        if_pending: IfPending = .queue,
+    };
+
+    pub const IfPending = enum {
+        /// Wait behind them.
+        queue,
+        /// Do not wait: a run is already pending (`--coalesce`).
+        skip,
+        /// Take their place: they stop waiting (`--replace`).
+        replace,
     };
 
     /// Serializes the LockRequest to a JSON string.
@@ -59,7 +71,7 @@ test "LockRequest.toJson serializes an acquire request correctly" {
         .timeout = null,
         .command = "echo Hello",
     } };
-    const expected = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\"}}";
+    const expected = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"if_pending\":\"queue\"}}";
 
     const json = try request.toJson(allocator);
     defer allocator.free(json);
@@ -91,6 +103,7 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
         .nonblock = false,
         .timeout = 30,
         .command = "echo Hello",
+        .if_pending = .replace,
     };
 
     const json = try (LockRequest{ .acquire = original }).toJson(allocator);
@@ -105,11 +118,12 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
     try std.testing.expectEqual(original.nonblock, acquire.nonblock);
     try std.testing.expectEqual(original.timeout, acquire.timeout);
     try std.testing.expectEqualStrings(original.command, acquire.command);
+    try std.testing.expectEqual(original.if_pending, acquire.if_pending);
 }
 
 test "LockRequest.fromJson correctly handles colon in command" {
     const allocator = std.testing.allocator;
-    const json = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":30,\"command\":\"echo Hello:World\"}}";
+    const json = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":30,\"command\":\"echo Hello:World\",\"if_pending\":\"queue\"}}";
     const parsed = try LockRequest.fromJson(json, allocator);
     defer parsed.deinit();
     const acquire = parsed.value.acquire;
@@ -228,14 +242,43 @@ pub const LockResponse = union(enum) {
     busy,
     timeout,
     /// The lock is held by someone else and the request was queued. Sent
-    /// before the client starts waiting, followed later by `ok` or `timeout`.
+    /// before the client starts waiting, followed later by `ok`, `timeout`
+    /// or `replaced`.
     queued: Queued,
+    /// The request asked to skip waiting (`if_pending = skip`) and another
+    /// client was already waiting for the lock, so it was not queued.
+    coalesced: Coalesced,
+    /// A queued request was taken out of the queue by a newer request with
+    /// `if_pending = replace`. Sent instead of `ok`.
+    replaced: Replaced,
 
     pub const Queued = struct {
         /// Who holds the lock.
         holder: LockInfo,
         /// Number of clients queued ahead of this one.
         ahead: usize,
+    };
+
+    pub const Coalesced = struct {
+        /// The most recently queued client, whose run is still to come.
+        pending: Client,
+        /// Number of clients waiting for the lock.
+        waiters: usize,
+    };
+
+    /// The client that took this one's place in the queue.
+    pub const Replaced = struct {
+        uid: u32,
+        /// 0 if unknown.
+        pid: i32,
+    };
+
+    /// A client waiting for a lock.
+    pub const Client = struct {
+        uid: u32,
+        /// 0 if unknown.
+        pid: i32,
+        command: []const u8,
     };
 
     /// Serializes the LockResponse to a JSON string.
@@ -314,6 +357,26 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trips a queued response
     try std.testing.expectEqualStrings("db", queued.holder.name);
     try std.testing.expectEqual(4242, queued.holder.pid);
     try std.testing.expectEqualStrings("./migrate --up", queued.holder.command);
+}
+
+test "LockResponse.fromJson(LockResponse.toJson()) round-trips coalesced and replaced responses" {
+    const allocator = std.testing.allocator;
+    const client: LockResponse.Client = .{ .uid = 501, .pid = 4321, .command = "make" };
+    for ([_]LockResponse{
+        .{ .coalesced = .{ .pending = client, .waiters = 1 } },
+        .{ .replaced = .{ .uid = 501, .pid = 4321 } },
+    }, [_][]const u8{
+        "{\"coalesced\":{\"pending\":{\"uid\":501,\"pid\":4321,\"command\":\"make\"},\"waiters\":1}}",
+        "{\"replaced\":{\"uid\":501,\"pid\":4321}}",
+    }) |original, expected| {
+        const json = try original.toJson(allocator);
+        defer allocator.free(json);
+        try std.testing.expectEqualStrings(expected, json);
+
+        const parsed = try LockResponse.fromJson(json, allocator);
+        defer parsed.deinit();
+        try std.testing.expectEqual(std.meta.activeTag(original), std.meta.activeTag(parsed.value));
+    }
 }
 
 pub fn writeLine(writer: *Io.Writer, message: []const u8) Io.Writer.Error!void {
