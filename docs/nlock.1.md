@@ -3,7 +3,7 @@ title: NLOCK
 section: 1
 header: User Commands
 footer: nlock
-date: October 15, 2026
+date: October 16, 2026
 ---
 
 # NAME
