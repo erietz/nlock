@@ -2,7 +2,6 @@ const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
 const log = nlock.logger.log;
-const ll = nlock.logger.LogLevel;
 
 pub const std_options: std.Options = .{
     // Release builds would otherwise compile out debug messages, leaving
@@ -25,7 +24,7 @@ const RunLockedError = error{
 
 pub fn main(init: std.process.Init) void {
     const status = run(init) catch |err| {
-        std.debug.print("An unexpected error occurred: {s}\n", .{@errorName(err)});
+        nlock.printer.eprint("nlock: unexpected error: {s}\n", .{@errorName(err)}) catch {};
         nlock.SysExits.software.exit();
     };
     std.process.exit(status);
@@ -33,8 +32,14 @@ pub fn main(init: std.process.Init) void {
 
 /// Returns the exit status for nlock: the command's for `run`, 0 for `list`.
 pub fn run(init: std.process.Init) !u8 {
-    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
     nlock.printer.init(init.io);
+    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map) catch blk: {
+        nlock.printer.eprint(
+            "nlock: ignoring invalid {s}; expected debug, info, warn, error or none\n",
+            .{nlock.logger.ENV_NLOCK_LOG_LEVEL},
+        ) catch {};
+        break :blk null;
+    });
 
     const args = init.minimal.args.toSlice(init.gpa) catch nlock.SysExits.oserr.exit();
     defer init.gpa.free(args);
@@ -61,12 +66,12 @@ pub fn run(init: std.process.Init) !u8 {
 
     const socket_path = try nlock.getSocketPath(init.gpa, init.environ_map);
     defer init.gpa.free(socket_path);
-    log(ll.Debug, "Connecting to lock server at {s}", .{socket_path});
+    log(.debug, "Connecting to lock server at {s}", .{socket_path});
 
     const address = std.Io.net.UnixAddress.init(socket_path) catch nlock.SysExits.osfile.exit();
     const stream = address.connect(init.io) catch |err| {
         nlock.printer.eprint(
-            "nlockd server is not running or cannot be reached at {s}: {s}\n",
+            "nlock: cannot reach nlockd at {s}: {s}; is it running?\n",
             .{ socket_path, @errorName(err) },
         ) catch nlock.SysExits.oserr.exit();
         nlock.SysExits.unavailable.exit();
@@ -75,15 +80,15 @@ pub fn run(init: std.process.Init) !u8 {
     verifyServer(stream) catch |err| switch (err) {
         error.UntrustedLockServer => {
             nlock.printer.eprint(
-                "Lock server socket belongs to another user. Refusing to use it.\n",
-                .{},
+                "nlock: refusing to use {s}: it is served by another user's nlockd\n",
+                .{socket_path},
             ) catch nlock.SysExits.oserr.exit();
             nlock.SysExits.unavailable.exit();
         },
         else => {
             nlock.printer.eprint(
-                "Failed to verify lock server identity: {s}\n",
-                .{@errorName(err)},
+                "nlock: cannot verify who serves {s}: {s}\n",
+                .{ socket_path, @errorName(err) },
             ) catch nlock.SysExits.oserr.exit();
             nlock.SysExits.software.exit();
         },
@@ -106,22 +111,22 @@ pub fn run(init: std.process.Init) !u8 {
         .run => |options| return runLocked(ctx, options) catch |err| switch (err) {
             RunLockedError.LockAlreadyAcquired => {
                 nlock.printer.eprint(
-                    "Lock is already acquired by another process.\n",
-                    .{},
+                    "nlock: '{s}' is held by another process\n",
+                    .{options.name},
                 ) catch nlock.SysExits.oserr.exit();
                 nlock.SysExits.tempfail.exit();
             },
             RunLockedError.LockAcquireTimeout => {
                 nlock.printer.eprint(
-                    "Failed to acquire lock within the specified timeout.\n",
-                    .{},
+                    "nlock: timed out waiting for '{s}'\n",
+                    .{options.name},
                 ) catch nlock.SysExits.oserr.exit();
                 nlock.SysExits.tempfail.exit();
             },
             RunLockedError.LockReleaseFailed => {
                 nlock.printer.eprint(
-                    "Failed to release lock. Please check the lock server logs for more details.\n",
-                    .{},
+                    "nlock: failed to release '{s}'; see the nlockd logs\n",
+                    .{options.name},
                 ) catch nlock.SysExits.oserr.exit();
                 nlock.SysExits.software.exit();
             },
@@ -148,7 +153,7 @@ fn verifyServer(stream: std.Io.net.Stream) !void {
     const server = try nlock.peer.peerCredentials(stream);
     const uid = std.c.getuid();
     if (server.uid != uid and server.uid != 0) {
-        log(ll.Error, "Lock server is run by uid {d}, expected {d} or root", .{ server.uid, uid });
+        log(.err, "Lock server is run by uid {d}, expected {d} or root", .{ server.uid, uid });
         return error.UntrustedLockServer;
     }
 }
@@ -169,21 +174,21 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
 
     switch (acquire_status) {
         nlock.LockResponseStatus.ok => {
-            log(ll.Debug, "Lock acquired successfully. Running command", .{});
+            log(.debug, "Lock acquired successfully. Running command", .{});
             // runCommand reports its own failures as an exit status, so the
             // lock is always released below.
             const status = runCommand(ctx.io, options.command);
-            log(ll.Debug, "Command finished. Releasing lock: {s}", .{options.name});
+            log(.debug, "Command finished. Releasing lock: {s}", .{options.name});
 
             const release_status = try releaseLock(ctx.allocator, ctx.writer, ctx.reader);
 
             switch (release_status) {
                 nlock.LockResponseStatus.ok => {
-                    log(ll.Debug, "Lock released successfully", .{});
+                    log(.debug, "Lock released successfully", .{});
                     return status;
                 },
                 else => {
-                    log(ll.Error, "Failed to release lock. Status: {d}", .{release_status});
+                    log(.err, "Failed to release lock. Status: {t}", .{release_status});
                     return RunLockedError.LockReleaseFailed;
                 },
             }
@@ -197,7 +202,7 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
         // A run is pending that will start after this request was made,
         // which is what the caller asked for, so this is success.
         nlock.LockResponseStatus.coalesced, nlock.LockResponseStatus.replaced => {
-            log(ll.Debug, "Not running the command: {s}", .{@tagName(acquire_status)});
+            log(.debug, "Not running the command: {s}", .{@tagName(acquire_status)});
             return 0;
         },
         // acquireLock reads past queued to the final status.
@@ -247,14 +252,14 @@ fn readLockInfos(
     var lock_infos: std.ArrayList(nlock.LockInfo) = .empty;
     while (true) {
         const response_message = try (reader.takeDelimiter('\n')) orelse break;
-        log(ll.Debug, "Received lock info: {s}", .{response_message});
+        log(.debug, "Received lock info: {s}", .{response_message});
         try lock_infos.append(arena, try nlock.LockInfo.fromJsonLeaky(response_message, arena));
     }
     return lock_infos;
 }
 
 /// `nlock list --json`: one JSON object per lock, one per line. Unlike the
-/// table, this round-trips arbitrary names and commands exactly.
+/// table, names and commands are not escaped.
 fn formatLockInfoJson(allocator: std.mem.Allocator, lock_infos: []const nlock.LockInfo) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (lock_infos) |lock_info| {
@@ -456,7 +461,7 @@ pub fn acquireLock(
     // Every response but queued is final.
     while (true) {
         const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-        log(ll.Debug, "Received lock response: {s}", .{response_message});
+        log(.debug, "Received lock response: {s}", .{response_message});
         const parsed = try nlock.LockResponse.fromJson(response_message, allocator);
         defer parsed.deinit();
         const status = std.meta.activeTag(parsed.value);
@@ -627,7 +632,7 @@ pub fn releaseLock(
     try nlock.writeLine(writer, release_message);
 
     const release_response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    log(ll.Debug, "Received release lock response: {s}", .{release_response_message});
+    log(.debug, "Received release lock response: {s}", .{release_response_message});
 
     const release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
     defer release_response.deinit();
@@ -702,7 +707,7 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
     };
 
     var child = std.process.spawn(io, spawnOptions) catch |err| {
-        std.debug.print("nlock: {s}: {s}\n", .{ command[0], @errorName(err) });
+        nlock.printer.eprint("nlock: {s}: {s}\n", .{ command[0], @errorName(err) }) catch {};
         return switch (err) {
             error.FileNotFound => exit_not_found,
             else => exit_not_executable,
@@ -717,21 +722,21 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
     }
 
     const term = child.wait(io) catch |err| {
-        std.debug.print("nlock: failed to wait for {s}: {s}\n", .{ command[0], @errorName(err) });
+        nlock.printer.eprint("nlock: failed to wait for {s}: {s}\n", .{ command[0], @errorName(err) }) catch {};
         return 1;
     };
 
     switch (term) {
         .exited => |code| {
-            log(ll.Debug, "Process exited with code: {d}", .{code});
+            log(.debug, "Process exited with code: {d}", .{code});
             return code;
         },
         .signal, .stopped => |sig| {
-            log(ll.Debug, "Process ended by signal: {d}", .{@intFromEnum(sig)});
+            log(.debug, "Process ended by signal: {d}", .{@intFromEnum(sig)});
             return 128 +| @as(u8, @intCast(@intFromEnum(sig)));
         },
         .unknown => |status| {
-            log(ll.Debug, "Process ended with unknown status: {d}", .{status});
+            log(.debug, "Process ended with unknown status: {d}", .{status});
             return 1;
         },
     }

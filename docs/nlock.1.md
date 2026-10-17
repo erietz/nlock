@@ -144,9 +144,10 @@ after **\-\-**, where it belongs to *command*.
 **\-\-json**
 :   Print one JSON object per lock, one per line, with the fields **name**,
     **pid**, **waiters**, **acquired_at** (seconds since the Unix epoch)
-    and **command**. Names and commands are
-    reproduced exactly, so prefer this format in scripts. Cannot be combined
-    with **-q**.
+    and **command**. Unlike the table, nothing is escaped, so prefer this
+    format in scripts. **command** is the command's arguments joined with
+    spaces, so quoting is lost, and is truncated like the CMD column.
+    Cannot be combined with **-q**.
 
 **-q**, **\-\-quiet**
 :   Print only lock names, one per line.
@@ -197,7 +198,9 @@ and unload it with:
 
 When installed with Homebrew, use **brew services start nlock** instead.
 
-Both service definitions set **NLOCK_LOG_LEVEL**=**Debug**.
+Both service definitions set **NLOCK_LOG_LEVEL**=**info**, which logs each
+lock as it is acquired and released. Use **debug** to also log every message
+exchanged with clients.
 
 # LOGGING
 
@@ -231,14 +234,16 @@ to syslog when **nlockd** is logging there.
     - *$XDG_RUNTIME_DIR*/nlock.sock on Linux, if **XDG_RUNTIME_DIR** is set
     - nlock.sock in the per-user temporary directory on macOS (see
       **getconf DARWIN_USER_TEMP_DIR**)
-    - /tmp/nlock-*uid*.sock
+    - /tmp/nlock-*uid*/nlock.sock. **nlockd** creates the directory with
+      mode 0700, and refuses to start if it exists but is a symlink or
+      belongs to another user.
 
 **NLOCK_LOG_LEVEL**
 :   Logging verbosity for both programs (see **LOGGING** for where
     **nlockd** writes it). One of
-    **Debug**, **Info**, **Warn**, **Error** or **None** (case-sensitive).
-    Defaults to **None**. Fatal **nlockd** startup errors are always
-    printed.
+    **debug**, **info**, **warn**, **error** or **none**, in any case.
+    Defaults to **none**. Any other value is ignored with a warning. Fatal
+    **nlockd** startup errors are always printed.
 
 # FILES
 
@@ -329,7 +334,7 @@ Print the command running under each lock:
 
 Start the daemon with a custom socket and debug logging:
 
-    NLOCK_SOCKET=$HOME/.nlock.sock NLOCK_LOG_LEVEL=Debug nlockd
+    NLOCK_SOCKET=$HOME/.nlock.sock NLOCK_LOG_LEVEL=debug nlockd
 
 # BUGS
 
