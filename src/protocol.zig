@@ -21,7 +21,6 @@ pub const LockRequest = union(enum) {
 
     pub const Acquire = struct {
         name: []const u8,
-        global: bool,
         nonblock: bool,
         timeout: ?u64,
         command: []const u8,
@@ -66,12 +65,11 @@ test "LockRequest.toJson serializes an acquire request correctly" {
     const allocator = std.testing.allocator;
     const request: LockRequest = .{ .acquire = .{
         .name = "mylock",
-        .global = true,
         .nonblock = false,
         .timeout = null,
         .command = "echo Hello",
     } };
-    const expected = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"if_pending\":\"queue\"}}";
+    const expected = "{\"acquire\":{\"name\":\"mylock\",\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"if_pending\":\"queue\"}}";
 
     const json = try request.toJson(allocator);
     defer allocator.free(json);
@@ -99,7 +97,6 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
     const allocator = std.testing.allocator;
     const original: LockRequest.Acquire = .{
         .name = "mylock",
-        .global = true,
         .nonblock = false,
         .timeout = 30,
         .command = "echo Hello",
@@ -114,7 +111,6 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
     const acquire = parsed.value.acquire;
 
     try std.testing.expectEqualStrings(original.name, acquire.name);
-    try std.testing.expectEqual(original.global, acquire.global);
     try std.testing.expectEqual(original.nonblock, acquire.nonblock);
     try std.testing.expectEqual(original.timeout, acquire.timeout);
     try std.testing.expectEqualStrings(original.command, acquire.command);
@@ -123,13 +119,12 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
 
 test "LockRequest.fromJson correctly handles colon in command" {
     const allocator = std.testing.allocator;
-    const json = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":30,\"command\":\"echo Hello:World\",\"if_pending\":\"queue\"}}";
+    const json = "{\"acquire\":{\"name\":\"mylock\",\"nonblock\":false,\"timeout\":30,\"command\":\"echo Hello:World\",\"if_pending\":\"queue\"}}";
     const parsed = try LockRequest.fromJson(json, allocator);
     defer parsed.deinit();
     const acquire = parsed.value.acquire;
 
     try std.testing.expectEqualStrings("mylock", acquire.name);
-    try std.testing.expectEqual(true, acquire.global);
     try std.testing.expectEqual(false, acquire.nonblock);
     try std.testing.expectEqual(30, acquire.timeout.?);
     try std.testing.expectEqualStrings("echo Hello:World", acquire.command);
@@ -137,13 +132,12 @@ test "LockRequest.fromJson correctly handles colon in command" {
 
 test "LockRequest.fromJson correctly handles newline in command" {
     const allocator = std.testing.allocator;
-    const json = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\\nWorld\"}}";
+    const json = "{\"acquire\":{\"name\":\"mylock\",\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\\nWorld\"}}";
     const parsed = try LockRequest.fromJson(json, allocator);
     defer parsed.deinit();
     const acquire = parsed.value.acquire;
 
     try std.testing.expectEqualStrings("mylock", acquire.name);
-    try std.testing.expectEqual(true, acquire.global);
     try std.testing.expectEqual(false, acquire.nonblock);
     try std.testing.expectEqual(null, acquire.timeout);
     try std.testing.expectEqualStrings("echo Hello\nWorld", acquire.command);
@@ -151,7 +145,7 @@ test "LockRequest.fromJson correctly handles newline in command" {
 
 test "LockRequest.fromJson rejects unknown fields and requests" {
     // A client and daemon of different versions should fail loudly.
-    const unknown_field = "{\"acquire\":{\"name\":\"mylock\",\"global\":true,\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"from_the_future\":true}}";
+    const unknown_field = "{\"acquire\":{\"name\":\"mylock\",\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"from_the_future\":true}}";
     try std.testing.expectError(error.UnknownField, LockRequest.fromJson(unknown_field, std.testing.allocator));
     const unknown_request = "{\"FromTheFuture\":{}}";
     try std.testing.expectError(error.UnknownField, LockRequest.fromJson(unknown_request, std.testing.allocator));
@@ -160,10 +154,8 @@ test "LockRequest.fromJson rejects unknown fields and requests" {
 /// One row of the `list` response: a lock currently held, and who holds it.
 pub const LockInfo = struct {
     name: []const u8,
-    uid: u32,
     /// Pid of the `nlock` client holding the lock, or 0 if unknown.
     pid: i32,
-    global: bool,
     /// Number of clients queued for the lock.
     waiters: usize,
     /// When the current holder acquired the lock, in seconds since the Unix
@@ -207,9 +199,7 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
     const allocator = std.testing.allocator;
     const original = LockInfo{
         .name = "mylock",
-        .uid = 501,
         .pid = 4242,
-        .global = true,
         .waiters = 2,
         .acquired_at = 1791331200,
         .command = "echo Hello",
@@ -218,7 +208,7 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
     const json = try original.toJson(allocator);
     defer allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"name\":\"mylock\",\"uid\":501,\"pid\":4242,\"global\":true,\"waiters\":2,\"acquired_at\":1791331200,\"command\":\"echo Hello\"}",
+        "{\"name\":\"mylock\",\"pid\":4242,\"waiters\":2,\"acquired_at\":1791331200,\"command\":\"echo Hello\"}",
         json,
     );
 
@@ -227,9 +217,7 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
     const info = info_parsed.value;
 
     try std.testing.expectEqualStrings(original.name, info.name);
-    try std.testing.expectEqual(original.uid, info.uid);
     try std.testing.expectEqual(original.pid, info.pid);
-    try std.testing.expectEqual(original.global, info.global);
     try std.testing.expectEqual(original.waiters, info.waiters);
     try std.testing.expectEqual(original.acquired_at, info.acquired_at);
     try std.testing.expectEqualStrings(original.command, info.command);
@@ -268,14 +256,12 @@ pub const LockResponse = union(enum) {
 
     /// The client that took this one's place in the queue.
     pub const Replaced = struct {
-        uid: u32,
         /// 0 if unknown.
         pid: i32,
     };
 
     /// A client waiting for a lock.
     pub const Client = struct {
-        uid: u32,
         /// 0 if unknown.
         pid: i32,
         command: []const u8,
@@ -333,9 +319,7 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trips a queued response
     const original: LockResponse = .{ .queued = .{
         .holder = .{
             .name = "db",
-            .uid = 501,
             .pid = 4242,
-            .global = false,
             .waiters = 3,
             .acquired_at = 1791331200,
             .command = "./migrate --up",
@@ -346,7 +330,7 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trips a queued response
     const json = try original.toJson(allocator);
     defer allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"queued\":{\"holder\":{\"name\":\"db\",\"uid\":501,\"pid\":4242,\"global\":false,\"waiters\":3,\"acquired_at\":1791331200,\"command\":\"./migrate --up\"},\"ahead\":2}}",
+        "{\"queued\":{\"holder\":{\"name\":\"db\",\"pid\":4242,\"waiters\":3,\"acquired_at\":1791331200,\"command\":\"./migrate --up\"},\"ahead\":2}}",
         json,
     );
 
@@ -361,13 +345,13 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trips a queued response
 
 test "LockResponse.fromJson(LockResponse.toJson()) round-trips coalesced and replaced responses" {
     const allocator = std.testing.allocator;
-    const client: LockResponse.Client = .{ .uid = 501, .pid = 4321, .command = "make" };
+    const client: LockResponse.Client = .{ .pid = 4321, .command = "make" };
     for ([_]LockResponse{
         .{ .coalesced = .{ .pending = client, .waiters = 1 } },
-        .{ .replaced = .{ .uid = 501, .pid = 4321 } },
+        .{ .replaced = .{ .pid = 4321 } },
     }, [_][]const u8{
-        "{\"coalesced\":{\"pending\":{\"uid\":501,\"pid\":4321,\"command\":\"make\"},\"waiters\":1}}",
-        "{\"replaced\":{\"uid\":501,\"pid\":4321}}",
+        "{\"coalesced\":{\"pending\":{\"pid\":4321,\"command\":\"make\"},\"waiters\":1}}",
+        "{\"replaced\":{\"pid\":4321}}",
     }) |original, expected| {
         const json = try original.toJson(allocator);
         defer allocator.free(json);

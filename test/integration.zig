@@ -136,7 +136,7 @@ test "list succeeds with no locks held" {
     defer daemon.stop(gpa, io);
 
     const cases = [_]struct { args: []const []const u8, expected: []const u8 }{
-        .{ .args = &.{"list"}, .expected = "NAME  USER  PID  SCOPE  ELAPSED  WAITERS  CMD\n" },
+        .{ .args = &.{"list"}, .expected = "NAME  PID  ELAPSED  WAITERS  CMD\n" },
         .{ .args = &.{ "list", "-H" }, .expected = "" },
         .{ .args = &.{ "list", "-q" }, .expected = "" },
         .{ .args = &.{ "list", "--json" }, .expected = "" },
@@ -179,7 +179,7 @@ test "three different locks can be held at the same time and listed" {
     defer gpa.free(script);
 
     // Started out of order to check that list sorts by name.
-    var client_c = try daemon.spawnClient(gpa, io, &.{ "run", "--global", "lock-c", "--", "sh", "-c", script });
+    var client_c = try daemon.spawnClient(gpa, io, &.{ "run", "lock-c", "--", "sh", "-c", script });
     var c_done = false;
     defer if (!c_done) client_c.kill(io);
     var client_a = try daemon.spawnClient(gpa, io, &.{ "run", "lock-a", "--", "sh", "-c", script });
@@ -196,27 +196,23 @@ test "three different locks can be held at the same time and listed" {
     defer gpa.free(result.stderr);
     try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
 
-    // All three clients run as the current user, whom the daemon identifies
-    // from the socket's peer credentials.
-    var uid_buf: [16]u8 = undefined;
-    const user = nlock.peer.userName(&uid_buf, std.c.getuid());
-    const expected_rows = [_]struct { name: []const u8, pid: std.posix.pid_t, scope: []const u8 }{
-        .{ .name = "lock-a", .pid = client_a.id.?, .scope = "user" },
-        .{ .name = "lock-b", .pid = client_b.id.?, .scope = "user" },
-        .{ .name = "lock-c", .pid = client_c.id.?, .scope = "global" },
+    // The daemon identifies each client's pid from the socket's peer
+    // credentials.
+    const expected_rows = [_]struct { name: []const u8, pid: std.posix.pid_t }{
+        .{ .name = "lock-a", .pid = client_a.id.? },
+        .{ .name = "lock-b", .pid = client_b.id.? },
+        .{ .name = "lock-c", .pid = client_c.id.? },
     };
 
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-    try expectFields(lines.next().?, &.{ "NAME", "USER", "PID", "SCOPE", "ELAPSED", "WAITERS", "CMD" });
+    try expectFields(lines.next().?, &.{ "NAME", "PID", "ELAPSED", "WAITERS", "CMD" });
     for (expected_rows) |row| {
         var pid_buf: [16]u8 = undefined;
         const pid = try std.fmt.bufPrint(&pid_buf, "{d}", .{row.pid});
         const line = lines.next().?;
         var fields = std.mem.tokenizeScalar(u8, line, ' ');
         try std.testing.expectEqualStrings(row.name, fields.next().?);
-        try std.testing.expectEqualStrings(user, fields.next().?);
         try std.testing.expectEqualStrings(pid, fields.next().?);
-        try std.testing.expectEqualStrings(row.scope, fields.next().?);
         _ = fields.next().?; // ELAPSED depends on timing
         try std.testing.expectEqualStrings("0", fields.next().?);
         // CMD is everything after WAITERS, spaces included.
@@ -268,10 +264,7 @@ test "list --json reports waiters and round-trips the command" {
 
         const parsed = try std.json.parseFromSlice(struct {
             name: []const u8,
-            user: []const u8,
-            uid: u32,
             pid: i32,
-            global: bool,
             waiters: usize,
             acquired_at: i64,
             command: []const u8,
@@ -284,9 +277,7 @@ test "list --json reports waiters and round-trips the command" {
             continue;
         }
         try std.testing.expectEqualStrings("mylock", info.name);
-        try std.testing.expectEqual(std.c.getuid(), info.uid);
         try std.testing.expectEqual(holder.id.?, info.pid);
-        try std.testing.expectEqual(false, info.global);
         try std.testing.expectEqual(1, info.waiters);
         try std.testing.expect(info.acquired_at <= before and info.acquired_at > before - 60);
         const expected_command = try std.fmt.allocPrint(gpa, "sh -c {s}", .{script});
@@ -479,7 +470,6 @@ test "a queued client is told who holds the lock before it waits" {
 
     const request = try (nlock.LockRequest{ .acquire = .{
         .name = "db",
-        .global = false,
         .nonblock = false,
         .timeout = null,
         .command = "true",
@@ -493,7 +483,6 @@ test "a queued client is told who holds the lock before it waits" {
     try std.testing.expectEqual(0, queued.ahead);
     const info = queued.holder;
     try std.testing.expectEqualStrings("db", info.name);
-    try std.testing.expectEqual(std.c.getuid(), info.uid);
     try std.testing.expectEqual(holder.id.?, info.pid);
     const expected_command = try std.fmt.allocPrint(gpa, "sh -c {s}", .{script});
     defer gpa.free(expected_command);
@@ -560,10 +549,12 @@ test "--replace takes the place of every waiter, which exit 0 without running" {
     defer for (&waiters, waiters_done) |*waiter, done| if (!done) waiter.kill(io);
     // One waits with a timeout and one without, since the daemon waits for
     // them differently.
-    for (&waiters, [_][]const u8{ "v1", "v2" }, [_][]const u8{ "-t", "--global" }, [_][]const u8{ "30", "--global" }, 1..) |*waiter, version, flag, value, count| {
+    for (&waiters, [_][]const u8{ "v1", "v2" }, [_][]const []const u8{ &.{ "-t", "30" }, &.{} }, 1..) |*waiter, version, options, count| {
         const script = try std.fmt.allocPrint(gpa, "echo {s} >> {s}", .{ version, log_path });
         defer gpa.free(script);
-        waiter.* = try daemon.spawnClient(gpa, io, &.{ "run", flag, value, "deploy", "--", "sh", "-c", script });
+        const args = try std.mem.concat(gpa, []const u8, &.{ &.{"run"}, options, &.{ "deploy", "--", "sh", "-c", script } });
+        defer gpa.free(args);
+        waiter.* = try daemon.spawnClient(gpa, io, args);
         try waitForWaiters(gpa, io, daemon, "deploy", count);
     }
 

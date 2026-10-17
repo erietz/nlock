@@ -225,16 +225,16 @@ same job:
 Either way, an exit status of 0 means a run is scheduled, not that it
 succeeded. So don't chain them with `&&`.
 
-**See which locks are held, by whom, and who is waiting:**
+**See which locks are held, by which process, and who is waiting:**
 
 ```bash
 watch -n 1 nlock list
 ```
 
 ```text
-NAME     USER    PID  SCOPE  ELAPSED  WAITERS  CMD
-gpu      ethan  4121  user     12:41        2  python train.py --config large.yaml
-test-db  ethan  4377  user     00:08        1  npm test
+NAME      PID  ELAPSED  WAITERS  CMD
+gpu      4121    12:41        2  python train.py --config large.yaml
+test-db  4377    00:08        1  npm test
 ```
 
 **Find locks held for more than an hour:**

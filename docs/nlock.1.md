@@ -3,7 +3,7 @@ title: NLOCK
 section: 1
 header: User Commands
 footer: nlock
-date: October 15, 2026
+date: October 16, 2026
 ---
 
 # NAME
@@ -12,7 +12,7 @@ nlock, nlockd - run commands while holding named locks
 
 # SYNOPSIS
 
-**nlock run** [**-g**] [**-n**] [**-t** *seconds*] [**\-\-coalesce** | **\-\-replace**] *name* **\-\-** *command* [*args*...]
+**nlock run** [**-n**] [**-t** *seconds*] [**\-\-coalesce** | **\-\-replace**] *name* **\-\-** *command* [*args*...]
 
 **nlock list** [**\-\-json** | **-q**] [**-H**]
 
@@ -69,19 +69,11 @@ Locks are managed by the **nlockd** daemon, which must be running before
     **NAME**
     :   The lock name.
 
-    **USER**
-    :   The user holding the lock, as a username, or as a numeric user ID if
-        it has no entry in the user database. It is taken from the kernel's
-        credentials for the connecting socket, so it cannot be spoofed by the
-        client.
-
     **PID**
     :   Process ID of the **nlock** client holding the lock (not of its
-        command), or **-** if the platform cannot report it.
-
-    **SCOPE**
-    :   **global** if the lock was requested with **\-\-global**, otherwise
-        **user**.
+        command), or **-** if the platform cannot report it. It is taken from
+        the kernel's credentials for the connecting socket, so it cannot be
+        spoofed by the client.
 
     **ELAPSED**
     :   How long the current holder has held the lock, as
@@ -110,10 +102,6 @@ Either option is honored anywhere among **nlock**'s own arguments, but not
 after **\-\-**, where it belongs to *command*.
 
 ## run
-
-**-g**, **\-\-global**
-:   Request a global lock. This flag is accepted and sent to the daemon, but
-    currently has no effect: all locks share a single namespace.
 
 **-n**, **\-\-nonblock**
 :   Do not wait. If the lock is already held, exit immediately with an error
@@ -150,8 +138,8 @@ after **\-\-**, where it belongs to *command*.
 
 **\-\-json**
 :   Print one JSON object per lock, one per line, with the fields **name**,
-    **user**, **uid**, **pid**, **global**, **waiters**, **acquired_at**
-    (seconds since the Unix epoch) and **command**. Names and commands are
+    **pid**, **waiters**, **acquired_at** (seconds since the Unix epoch)
+    and **command**. Names and commands are
     reproduced exactly, so prefer this format in scripts. Cannot be combined
     with **-q**.
 
@@ -324,15 +312,15 @@ Run a shell pipeline under a lock:
 
 Show the locks that have clients queued for them:
 
-    nlock list -H | awk '$6 > 0 { print $1 }'
+    nlock list -H | awk '$4 > 0 { print $1 }'
 
 Check whether a lock is currently held:
 
     nlock list -q | grep -qx build && echo "build is locked"
 
-List the commands running under global locks:
+Print the command running under each lock:
 
-    nlock list --json | jq -r 'select(.global) | .command'
+    nlock list --json | jq -r '"\(.name): \(.command)"'
 
 Start the daemon with a custom socket and debug logging:
 
