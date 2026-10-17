@@ -25,8 +25,9 @@ nlock, nlockd - run commands while holding named locks
 # DESCRIPTION
 
 **nlock** serializes commands across processes and terminals using named
-locks. Each lock is identified by a *name*, which may contain any characters
-except whitespace and control characters. While one **nlock run**
+locks. Each lock is identified by a *name* of up to 255 bytes, which may
+contain any characters except whitespace and control characters, and may
+not start with **-**. While one **nlock run**
 holds a lock, any other **nlock run** for the same *name* waits until the lock
 is released, then runs its own command. Waiters are served in the order they
 arrived.
@@ -56,9 +57,12 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
     While the command runs, **nlock** ignores **SIGINT** and **SIGQUIT**;
     the terminal sends them to the command as well, and **nlock** releases
-    the lock once the command exits. If **nlock** itself is killed, or loses
-    its connection to **nlockd** for any reason, the daemon releases the lock
-    on its behalf.
+    the lock once the command exits. **SIGTERM** and **SIGHUP**, as sent by
+    **kill**(1), **timeout**(1), a service manager or a closing terminal,
+    are passed on to the command, and the lock is likewise held until it
+    exits. If **nlock** itself is killed with **SIGKILL**, or loses its
+    connection to **nlockd** for any reason, the daemon releases the lock on
+    its behalf, even if the command is still running.
 
 **list** [**\-\-json** | **-q**] [**-H**]
 :   Print the locks currently held, one per line, sorted by name. By default
@@ -87,7 +91,8 @@ Locks are managed by the **nlockd** daemon, which must be running before
         since it is the only one that may contain spaces; every other column
         can be split on whitespace. Control characters are shown escaped
         (**\\n**, **\\t**, **\\r**, **\\x***NN*) so each lock stays on one
-        line.
+        line. Commands longer than 4096 bytes are truncated and end in
+        **...**; this affects only what is shown, not what runs.
 
 # OPTIONS
 

@@ -4,6 +4,12 @@ const nlock = @import("nlock");
 const log = nlock.logger.log;
 const ll = nlock.logger.LogLevel;
 
+pub const std_options: std.Options = .{
+    // Release builds would otherwise compile out debug messages, leaving
+    // NLOCK_LOG_LEVEL=Debug no effect. NLOCK_LOG_LEVEL does the filtering.
+    .log_level = .debug,
+};
+
 const Context = struct {
     io: Io,
     reader: *Io.Reader,
@@ -86,7 +92,7 @@ pub fn run(init: std.process.Init) !u8 {
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(init.io, &write_buffer);
 
-    var read_buffer: [1024]u8 = undefined;
+    var read_buffer: [nlock.max_message_len]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
 
     const ctx = Context{
@@ -435,10 +441,7 @@ pub fn acquireLock(
     options: nlock.cli.RunOptions,
     report: bool,
 ) !nlock.LockResponseStatus {
-    const command_str = std.mem.join(allocator, " ", options.command) catch {
-        log(ll.Error, "Failed to join command arguments", .{});
-        return error.InvalidArguments;
-    };
+    const command_str = try formatCommand(allocator, options.command);
     defer allocator.free(command_str);
     const message = try (nlock.LockRequest{ .acquire = .{
         .name = options.name,
@@ -473,6 +476,44 @@ pub fn acquireLock(
 
         if (status != .queued) return status;
     }
+}
+
+/// The command as shown in `nlock list` and in messages: the arguments joined
+/// with spaces, truncated to `max_command_len` bytes. Caller owns the result.
+fn formatCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
+    const joined = try std.mem.join(allocator, " ", argv);
+    if (joined.len <= nlock.max_command_len) return joined;
+    defer allocator.free(joined);
+
+    const ellipsis = "...";
+    var end = nlock.max_command_len - ellipsis.len;
+    // Back up to the start of a UTF-8 sequence so the cut does not turn a
+    // valid command into invalid UTF-8.
+    while (end > 0 and joined[end] & 0xC0 == 0x80) end -= 1;
+    return std.mem.concat(allocator, u8, &.{ joined[0..end], ellipsis });
+}
+
+test "formatCommand joins arguments and truncates long commands" {
+    const allocator = std.testing.allocator;
+
+    const short = try formatCommand(allocator, &.{ "echo", "hello" });
+    defer allocator.free(short);
+    try std.testing.expectEqualStrings("echo hello", short);
+
+    const exact = try formatCommand(allocator, &.{"x" ** nlock.max_command_len});
+    defer allocator.free(exact);
+    try std.testing.expectEqual(nlock.max_command_len, exact.len);
+
+    const long = try formatCommand(allocator, &.{ "echo", "x" ** (2 * nlock.max_command_len) });
+    defer allocator.free(long);
+    try std.testing.expectEqual(nlock.max_command_len, long.len);
+    try std.testing.expect(std.mem.endsWith(u8, long, "xx..."));
+
+    // "é" is two bytes; a cut through the middle of one backs up before it.
+    const accents = try formatCommand(allocator, &.{"é" ** nlock.max_command_len});
+    defer allocator.free(accents);
+    try std.testing.expect(accents.len <= nlock.max_command_len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(accents));
 }
 
 /// The line printed when the request was coalesced into a run that is
@@ -603,6 +644,30 @@ fn ignoreSignal(_: std.posix.SIG) callconv(.c) void {}
 /// child receives them too, so nlock outlives it and can release the lock.
 const terminal_signals = [_]std.posix.SIG{ .INT, .QUIT };
 
+/// Signals asking nlock to stop, from `kill`, `timeout`, a service manager or
+/// a closing terminal. They are passed on to the command instead, so the
+/// lock is released only once the command has exited. Were nlock to die
+/// first, the daemon would release the lock with the command still running.
+const forwarded_signals = [_]std.posix.SIG{ .TERM, .HUP };
+
+const SigNum = std.meta.Tag(std.posix.SIG);
+
+/// Pid of the running command, or 0 before it has started.
+var forward_pid: std.atomic.Value(std.posix.pid_t) = .init(0);
+/// The last forwarded signal received, or 0 if none.
+var forward_sig: std.atomic.Value(SigNum) = .init(0);
+
+/// Signal handlers may run on any thread, including while the command is
+/// being started. The handler records the signal before reading the pid, and
+/// `runCommand` records the pid before reading the signal, so at least one
+/// of them sees the other's write and the command always gets the signal
+/// (occasionally twice).
+fn forwardSignal(sig: std.posix.SIG) callconv(.c) void {
+    forward_sig.store(@intFromEnum(sig), .seq_cst);
+    const pid = forward_pid.load(.seq_cst);
+    if (pid > 0) _ = std.c.kill(pid, sig);
+}
+
 /// Exit statuses for a command that could not be started, as used by shells
 /// and by `env`, `nohup` and `flock`.
 const exit_not_executable = 126;
@@ -620,6 +685,18 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
     for (terminal_signals, &old_actions) |sig, *old| std.posix.sigaction(sig, &act, old);
     defer for (terminal_signals, &old_actions) |sig, *old| std.posix.sigaction(sig, old, null);
 
+    forward_pid.store(0, .seq_cst);
+    forward_sig.store(0, .seq_cst);
+    var old_forward_actions: [forwarded_signals.len]std.posix.Sigaction = undefined;
+    const forward_act: std.posix.Sigaction = .{
+        .handler = .{ .handler = forwardSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.RESTART,
+    };
+    for (forwarded_signals, &old_forward_actions) |sig, *old| std.posix.sigaction(sig, &forward_act, old);
+    defer for (forwarded_signals, &old_forward_actions) |sig, *old| std.posix.sigaction(sig, old, null);
+    defer forward_pid.store(0, .seq_cst);
+
     const spawnOptions: std.process.SpawnOptions = .{
         .argv = command,
     };
@@ -631,6 +708,13 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
             else => exit_not_executable,
         };
     };
+
+    if (child.id) |pid| {
+        forward_pid.store(pid, .seq_cst);
+        // A signal that arrived while the command was starting.
+        const sig = forward_sig.load(.seq_cst);
+        if (sig != 0) _ = std.c.kill(pid, @enumFromInt(sig));
+    }
 
     const term = child.wait(io) catch |err| {
         std.debug.print("nlock: failed to wait for {s}: {s}\n", .{ command[0], @errorName(err) });

@@ -383,6 +383,57 @@ test "client survives SIGINT and releases the lock after the command exits" {
     try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
 }
 
+test "SIGTERM and SIGHUP reach the command, and the lock is held until it exits" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const log_path = try daemon.tmpPath(gpa, "log");
+    defer gpa.free(log_path);
+    const go_path = try daemon.tmpPath(gpa, "go");
+    defer gpa.free(go_path);
+
+    // The command logs the signal, then keeps running until the test
+    // creates `go`, so the test can check the lock is still held meanwhile.
+    const script = try std.fmt.allocPrint(
+        gpa,
+        "trap 'echo got >> {0s}; while [ ! -f {1s} ]; do sleep 0.01; done; exit 3' TERM HUP; " ++
+            "echo start >> {0s}; while :; do sleep 0.01; done",
+        .{ log_path, go_path },
+    );
+    defer gpa.free(script);
+
+    for ([_]std.posix.SIG{ .TERM, .HUP }) |sig| {
+        daemon.tmp.dir.deleteFile(io, "log") catch {};
+        daemon.tmp.dir.deleteFile(io, "go") catch {};
+
+        var holder = try daemon.spawnClient(gpa, io, &.{ "run", "mylock", "--", "sh", "-c", script });
+        var holder_done = false;
+        defer if (!holder_done) holder.kill(io);
+        try waitForFileContents(gpa, io, daemon.tmp.dir, "log", "start\n");
+
+        try std.posix.kill(holder.id.?, sig);
+        try waitForFileContents(gpa, io, daemon.tmp.dir, "log", "start\ngot\n");
+
+        // The command is still running, so the lock must still be held.
+        const busy = try daemon.client(gpa, io, &.{ "run", "--nonblock", "mylock", "--", "true" });
+        defer gpa.free(busy.stdout);
+        defer gpa.free(busy.stderr);
+        try std.testing.expectEqual(Term{ .exited = @intFromEnum(nlock.SysExits.tempfail) }, busy.term);
+
+        try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
+        holder_done = true;
+        try std.testing.expectEqual(Term{ .exited = 3 }, try holder.wait(io));
+
+        const free = try daemon.client(gpa, io, &.{ "run", "--nonblock", "mylock", "--", "true" });
+        defer gpa.free(free.stdout);
+        defer gpa.free(free.stderr);
+        try std.testing.expectEqual(Term{ .exited = 0 }, free.term);
+    }
+}
+
 test "a second daemon refuses to take over a socket in use" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -575,6 +626,72 @@ test "--replace takes the place of every waiter, which exit 0 without running" {
     newest_done = true;
     try std.testing.expectEqual(Term{ .exited = 0 }, try newest.wait(io));
     try expectFileContents(gpa, io, daemon.tmp.dir, "log", "v3\n");
+}
+
+test "a huge --timeout waits normally instead of crashing the daemon" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    var holder = try HeldLock.start(gpa, io, daemon, "mylock");
+    defer holder.finish(io) catch {};
+
+    var waiters: [2]std.process.Child = undefined;
+    var waiters_done = [_]bool{ false, false };
+    defer for (&waiters, waiters_done) |*waiter, done| if (!done) waiter.kill(io);
+    for (&waiters, [_][]const u8{ "18446744073709551615", "9223372036854775807" }, 1..) |*waiter, timeout, count| {
+        waiter.* = try daemon.spawnClient(gpa, io, &.{ "run", "-t", timeout, "mylock", "--", "true" });
+        try waitForWaiters(gpa, io, daemon, "mylock", count);
+    }
+
+    try holder.finish(io);
+    for (&waiters, &waiters_done) |*waiter, *done| {
+        done.* = true;
+        try std.testing.expectEqual(Term{ .exited = 0 }, try waiter.wait(io));
+    }
+}
+
+test "long commands run, and are shown truncated" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    // Far longer than a message may be, so the command must be truncated
+    // before it is sent.
+    const long_arg = "x" ** (4 * nlock.max_message_len);
+
+    const result = try daemon.client(gpa, io, &.{ "run", "mylock", "--", "echo", long_arg });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqual(long_arg.len + 1, result.stdout.len);
+
+    const go_path = try daemon.tmpPath(gpa, "go");
+    defer gpa.free(go_path);
+    defer daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" }) catch {};
+    const script = try std.fmt.allocPrint(gpa, "while [ ! -f {s} ]; do sleep 0.01; done", .{go_path});
+    defer gpa.free(script);
+    var holder = try daemon.spawnClient(gpa, io, &.{ "run", "mylock", "--", "sh", "-c", script, long_arg });
+    var holder_done = false;
+    defer if (!holder_done) holder.kill(io);
+    try waitForWaiters(gpa, io, daemon, "mylock", 0);
+
+    const listed = try daemon.client(gpa, io, &.{ "list", "--json" });
+    defer gpa.free(listed.stdout);
+    defer gpa.free(listed.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, listed.term);
+    const parsed = try std.json.parseFromSlice(struct { command: []const u8 }, gpa, listed.stdout, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+    try std.testing.expectEqual(nlock.max_command_len, parsed.value.command.len);
+    try std.testing.expect(std.mem.endsWith(u8, parsed.value.command, "..."));
+
+    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
+    holder_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
 }
 
 test "run rejects --coalesce with --replace" {

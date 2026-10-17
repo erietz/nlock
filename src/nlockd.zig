@@ -4,7 +4,12 @@ const nlock = @import("nlock");
 const log = nlock.logger.log;
 const ll = nlock.logger.LogLevel;
 
-pub const std_options: std.Options = .{ .logFn = logFn };
+pub const std_options: std.Options = .{
+    // Release builds would otherwise compile out debug messages, leaving
+    // NLOCK_LOG_LEVEL=Debug no effect. NLOCK_LOG_LEVEL does the filtering.
+    .log_level = .debug,
+    .logFn = logFn,
+};
 
 /// Whether log messages go to syslog instead of stderr. Set once at startup.
 ///
@@ -141,7 +146,16 @@ pub fn runServer(init: std.process.Init) !void {
     defer group.cancel(io);
 
     while (true) {
-        const stream = try server.accept(io);
+        const stream = server.accept(io) catch |err| switch (err) {
+            error.Canceled, error.SocketNotListening => return err,
+            // Usually temporary, e.g. out of file descriptors because of
+            // many open connections. Pause rather than spin, then retry.
+            else => {
+                log(ll.Error, "Failed to accept connection: {s}", .{@errorName(err)});
+                try io.sleep(.fromMilliseconds(100), .awake);
+                continue;
+            },
+        };
         // Spawn a new task to handle the connection
         group.concurrent(io, connectionTask, .{
             io,
@@ -205,8 +219,10 @@ fn handleConnection(
     map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
 ) !void {
     defer stream.close(io);
-    var read_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(io, &read_buffer);
+    // On the heap: connection tasks may run on small stacks.
+    const read_buffer = try allocator.alloc(u8, nlock.max_message_len);
+    defer allocator.free(read_buffer);
+    var reader = stream.reader(io, read_buffer);
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
 
@@ -268,17 +284,18 @@ fn handleConnection(
         // A connection may only release the lock it acquired, so the request
         // does not name one.
         .release => {
-            handleReleaseLockRequest(
-                io,
-                allocator,
-                req.name,
-                map,
-                &writer.interface,
-            ) catch |err| {
-                log(ll.Debug, "Failed to handle release lock request: {s}", .{@errorName(err)});
-                return err;
-            };
+            // Marked before releasing: once the lock is passed on, nothing
+            // after this point (e.g. failing to send the reply) may release
+            // it again on disconnect, or it would release the next holder's.
             released = true;
+            log(ll.Info, "Releasing lock for name '{s}'", .{req.name});
+            if (!releaseLock(io, allocator, map, req.name)) {
+                log(ll.Error, "No lock found for name '{s}' to release.", .{req.name});
+                return error.LockNotFound;
+            }
+            const lock_response = try (nlock.LockResponse{ .ok = {} }).toJson(allocator);
+            defer allocator.free(lock_response);
+            try nlock.writeLine(&writer.interface, lock_response);
         },
         else => |release_req| {
             log(ll.Debug, "Received unexpected request type: {s}", .{@tagName(release_req)});
@@ -312,6 +329,9 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     try std.testing.expectEqual(expected_request.nonblock, request.nonblock);
     try std.testing.expectEqualStrings(expected_request.command, request.command);
 }
+
+/// Longest `--timeout` honored, in seconds. Longer ones wait indefinitely.
+const max_timeout_s: u64 = 10 * 365 * std.time.s_per_day;
 
 /// Returns true if the connection now holds the lock, or false if it does
 /// not: the lock was busy and the request was nonblocking, the request was
@@ -411,13 +431,14 @@ fn handleAcquireLockRequest(
             return err;
         };
 
-        if (lock_request.timeout) |timeout_s| {
-            log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_request.name, timeout_s });
-            // TODO: This is not a safe type cast. We should use a safe cast or
-            // check the value before casting.
+        // The timeout comes from the client, so anything too large to be a
+        // real limit is treated as no limit rather than trusted.
+        const timeout_s: ?u64 = if (lock_request.timeout) |t| (if (t <= max_timeout_s) t else null) else null;
+        if (timeout_s) |t| {
+            log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_request.name, t });
             const timeout = std.Io.Timeout{ .duration = .{
                 .clock = .awake,
-                .raw = std.Io.Duration.fromSeconds(@intCast(timeout_s)),
+                .raw = std.Io.Duration.fromSeconds(@intCast(t)),
             } };
 
             // Wait for the lock to be released. This does not happen until the
@@ -546,27 +567,6 @@ fn abandonWait(
         map.unlock();
         _ = releaseLock(io, allocator, map, name);
     }
-}
-
-fn handleReleaseLockRequest(
-    io: Io,
-    allocator: std.mem.Allocator,
-    name: []const u8,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
-    writer: *Io.Writer,
-) !void {
-    log(ll.Info, "Releasing lock for name '{s}'", .{name});
-
-    if (releaseLock(io, allocator, map, name)) {
-        log(ll.Info, "Lock for name '{s}' released successfully.", .{name});
-        const lock_response = try (nlock.LockResponse{ .ok = {} }).toJson(allocator);
-        defer allocator.free(lock_response);
-        try nlock.writeLine(writer, lock_response);
-        return;
-    }
-
-    log(ll.Error, "No lock found for name '{s}' to release.", .{name});
-    return error.LockNotFound;
 }
 
 /// Hands the lock to the next waiter, or removes it if there is none.
