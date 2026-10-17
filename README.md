@@ -173,6 +173,58 @@ nlock run -n deploy -- ./deploy.sh       # exit 75 right away if a deploy is run
 nlock run -t 300 deploy -- ./deploy.sh   # exit 75 after 5 minutes without the lock
 ```
 
+**Rebuild on save without a backlog.** A file watcher can fire a dozen times
+during one build. `--coalesce` keeps at most one build waiting, and every extra
+trigger exits 0. That waiting build hasn't started yet, so it will pick up those
+changes too:
+
+```bash
+fswatch -o src/ | while read -r _; do
+  nlock run --coalesce build -- make -j8 &
+done
+```
+
+The `&` matters. Without it the loop waits for each build to finish, so requests
+never overlap and nothing gets coalesced. On Linux, use
+`inotifywait -mrq -e close_write src/` in place of `fswatch -o src/`.
+
+**Keep generated files fresh from git hooks.** Commits, checkouts and merges
+each fire a hook, often in quick succession. Save this as `post-commit`,
+`post-checkout` and `post-merge` in `.git/hooks/`:
+
+```sh
+#!/bin/sh
+nlock run --coalesce "tags:$PWD" -- ctags -R . >/dev/null 2>&1 &
+```
+
+The `&` lets git carry on right away, and `$PWD` in the name gives each
+repository its own job.
+
+**Deploy only the newest push.** Push A, B and C while A is deploying, and the
+next deploy is C. B was replaced while it waited. Plain `nlock` would deploy B
+and then C; `flock -n` would skip both and leave A live. Save as
+`hooks/post-receive` on the server:
+
+```sh
+#!/bin/sh
+while read -r old new ref; do
+  if [ "$ref" = refs/heads/main ]; then
+    nlock run --replace deploy -- /srv/app/deploy.sh "$new" >>/var/log/deploy.log 2>&1 &
+  fi
+done
+```
+
+**Which one?** Both flags treat every request for the same lock name as the
+same job:
+
+| Each run…                                  | Use          |
+|--------------------------------------------|--------------|
+| does the same thing (`make`, `ctags -R .`) | `--coalesce` |
+| carries newer input (a commit, a value)    | `--replace`  |
+
+Either way, an exit status of 0 means a run is scheduled, not that it
+succeeded. So don't chain them with `&&`.
+
 **See which locks are held, by whom, and who is waiting:**
 
 ```bash
