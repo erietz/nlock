@@ -249,7 +249,7 @@ fn handleConnection(
         log(ll.Error, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
         return err;
     };
-    // Nonblocking request for a busy lock: nothing to release.
+    // Busy, coalesced or replaced: nothing to release.
     if (!holding) return;
 
     // If the client goes away without releasing (e.g. it was killed by a
@@ -315,8 +315,9 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     try std.testing.expectEqualStrings(expected_request.command, request.command);
 }
 
-/// Returns true if the connection now holds the lock, or false if the lock
-/// was busy and the request was nonblocking.
+/// Returns true if the connection now holds the lock, or false if it does
+/// not: the lock was busy and the request was nonblocking, the request was
+/// coalesced into a pending run, or it was replaced while queued.
 fn handleAcquireLockRequest(
     io: Io,
     allocator: std.mem.Allocator,
@@ -332,6 +333,26 @@ fn handleAcquireLockRequest(
     if (map.map.getPtr(lock_request.name)) |existing_lock| {
         log(ll.Info, "Lock for name '{s}' is already acquired", .{lock_request.name});
 
+        // A queued client has not started its run yet, so that run happens
+        // after whatever triggered this request: no need to queue another.
+        if (lock_request.if_pending == .skip) if (existing_lock.waiters.last) |last_node| {
+            const pending: *nlock.Waiter = @fieldParentPtr("node", last_node);
+            // Serialized while holding the mutex: the waiter and its command
+            // may be gone as soon as it is released.
+            const coalesced_response = (nlock.LockResponse{ .coalesced = .{
+                .pending = .{ .uid = pending.uid, .pid = pending.pid, .command = pending.command },
+                .waiters = existing_lock.waiters.len(),
+            } }).toJson(allocator) catch |err| {
+                map.unlock();
+                return err;
+            };
+            map.unlock();
+            defer allocator.free(coalesced_response);
+            log(ll.Info, "Lock '{s}' already has a pending run. Not queueing.", .{lock_request.name});
+            try nlock.writeLine(writer, coalesced_response);
+            return false;
+        };
+
         if (lock_request.nonblock) {
             map.unlock();
             const busy_response = try (nlock.LockResponse{ .busy = {} }).toJson(allocator);
@@ -345,9 +366,11 @@ fn handleAcquireLockRequest(
             return err;
         };
 
+        const replace = lock_request.if_pending == .replace;
+
         // Tell the client who it is waiting for. Serialized now, while the
         // holder cannot change, but sent after releasing the mutex.
-        const ahead = existing_lock.waiters.len();
+        const ahead = if (replace) 0 else existing_lock.waiters.len();
         const queued_response = (nlock.LockResponse{ .queued = .{
             .holder = .{
                 .name = lock_request.name,
@@ -373,6 +396,17 @@ fn handleAcquireLockRequest(
             .pid = peer.pid,
             .global = lock_request.global,
         };
+        if (replace) {
+            // Every waiter is an older request for the same job, so take
+            // their place. Each is woken and told who replaced it.
+            var replaced_count: usize = 0;
+            while (existing_lock.waiters.popFirst()) |node| : (replaced_count += 1) {
+                const replaced: *nlock.Waiter = @fieldParentPtr("node", node);
+                replaced.replaced_by = .{ .uid = peer.uid, .pid = peer.pid };
+                replaced.event.set(io);
+            }
+            log(ll.Info, "Replaced {d} waiter(s) for lock '{s}'", .{ replaced_count, lock_request.name });
+        }
         // Queue up the command to be executed when the acquired lock is
         // released
         existing_lock.waiters.append(&waiter.node);
@@ -400,6 +434,9 @@ fn handleAcquireLockRequest(
                 error.Timeout => {
                     log(ll.Info, "Timeout while waiting for lock '{s}' to be released", .{lock_request.name});
                     map.lock();
+                    // Not set: still queued. Set: the lock arrived, or this
+                    // waiter was replaced, just as the timeout expired;
+                    // handled below.
                     if (!waiter.event.isSet()) {
                         if (map.map.getPtr(lock_request.name)) |curr_lock| {
                             curr_lock.waiters.remove(&waiter.node);
@@ -426,6 +463,20 @@ fn handleAcquireLockRequest(
                 abandonWait(io, allocator, map, lock_request.name, &waiter);
                 return err;
             };
+        }
+
+        if (waiter.replaced_by) |by| {
+            // Taken out of the queue, so the command was never handed to
+            // the lock and is still ours.
+            allocator.free(command_copy);
+            log(ll.Info, "Waiter for lock '{s}' was replaced by pid {d}", .{ lock_request.name, by.pid });
+            const replaced_response = try (nlock.LockResponse{ .replaced = .{
+                .uid = by.uid,
+                .pid = by.pid,
+            } }).toJson(allocator);
+            defer allocator.free(replaced_response);
+            try nlock.writeLine(writer, replaced_response);
+            return false;
         }
     } else {
         // The map owns copies of both the name and the command: `lock_request`
@@ -482,7 +533,8 @@ fn handleAcquireLockRequest(
 
 /// Cleans up after a queued client that stopped waiting because of an error
 /// (e.g. it disconnected). If the lock has not reached it yet, it leaves the
-/// queue; if it has, the lock is passed on to the next waiter.
+/// queue; if it has, the lock is passed on to the next waiter. If it was
+/// replaced, it is already out of the queue and only its command is freed.
 fn abandonWait(
     io: Io,
     allocator: std.mem.Allocator,
@@ -495,6 +547,9 @@ fn abandonWait(
         if (map.map.getPtr(name)) |curr_lock| {
             curr_lock.waiters.remove(&waiter.node);
         }
+        map.unlock();
+        allocator.free(waiter.command);
+    } else if (!waiter.granted()) {
         map.unlock();
         allocator.free(waiter.command);
     } else {

@@ -12,9 +12,11 @@ nlock, nlockd - run commands while holding named locks
 
 # SYNOPSIS
 
-**nlock run** [**-g**] [**-n**] [**-t** *seconds*] *name* **\-\-** *command* [*args*...]
+**nlock run** [**-g**] [**-n**] [**-t** *seconds*] [**\-\-coalesce** | **\-\-replace**] *name* **\-\-** *command* [*args*...]
 
 **nlock list** [**\-\-json** | **-q**] [**-H**]
+
+**nlock** **-h** | **\-\-help**
 
 **nlock \-\-version**
 
@@ -97,8 +99,15 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
 # OPTIONS
 
+**-h**, **\-\-help**
+:   Print a summary of the commands and options to standard output and
+    exit.
+
 **\-\-version**
 :   Print the version and exit.
+
+Either option is honored anywhere among **nlock**'s own arguments, but not
+after **\-\-**, where it belongs to *command*.
 
 ## run
 
@@ -114,6 +123,28 @@ Locks are managed by the **nlockd** daemon, which must be running before
 :   Wait at most *seconds* (a non-negative integer) for the lock. If the lock
     is not acquired in time, exit with an error without running the command.
     Without this option, **nlock** waits indefinitely.
+
+**\-\-coalesce**
+:   If other clients are already waiting for the lock, exit **0** at once
+    without running the command. A queued client has not started yet, so
+    its run happens after this request was made and sees whatever prompted
+    it. Many triggers in a row, such as file saves or git hooks, collapse
+    into one run in progress and one pending. If nobody is waiting, queue as
+    usual. This takes precedence over **\-\-nonblock**. Cannot be combined
+    with **\-\-replace**.
+
+**\-\-replace**
+:   Take the place of every client waiting for the lock. They stop waiting
+    and exit **0** without running their commands, and this request is
+    queued instead, so the newest request is the next to run. Useful when
+    only the latest request matters, such as deploying the newest commit.
+    With **\-\-nonblock**, a held lock still fails without replacing
+    anyone. Cannot be combined with **\-\-coalesce**.
+
+    Both options treat every request for the same *name* as the same job,
+    whatever its command. Put anything that distinguishes jobs, such as a
+    deploy target, in the name. When standard error is a terminal, a client
+    that does not run its command because of either option says why.
 
 ## list
 
@@ -225,7 +256,10 @@ to syslog when **nlockd** is logging there.
 # EXIT STATUS
 
 **nlock run** exits with the exit status of *command*, so it can be used in
-place of the command in scripts and **&&** chains. If a signal ends
+place of the command in scripts and **&&** chains. With **\-\-coalesce** or
+**\-\-replace**, it exits **0** without running *command* when another
+request will run instead; **0** then means a run is scheduled, not that it
+succeeded. If a signal ends
 *command*, **nlock** exits with 128 plus the signal number, as a shell
 reports it. If *command* cannot be run, **nlock** exits **127** when it is
 not found and **126** otherwise.
@@ -235,7 +269,7 @@ When **nlock** itself fails, it exits with one of the following codes from
 told apart from **nlock** failing.
 
 **64** (EX_USAGE)
-:   The arguments are invalid. The usage message is printed to standard
+:   The arguments are invalid. A short usage message is printed to standard
     error.
 
 **69** (EX_UNAVAILABLE)
@@ -258,7 +292,7 @@ told apart from **nlock** failing.
 :   The lock is busy and **\-\-nonblock** was given, or the **\-\-timeout**
     expired before the lock was acquired. Retrying later may succeed.
 
-**nlock list** and **nlock \-\-version** exit **0** on success.
+**nlock list**, **nlock \-\-help** and **nlock \-\-version** exit **0** on success.
 
 # EXAMPLES
 
@@ -273,6 +307,16 @@ Give up if another deploy is already running:
 Wait at most 30 seconds for the lock:
 
     nlock run -t 30 db-migrate -- ./migrate.sh
+
+Rebuild on every save, but never queue more than one extra build:
+
+    fswatch -o src/ | while read -r _; do
+        nlock run --coalesce build -- make &
+    done
+
+Deploy only the newest pushed revision, dropping any that are still waiting:
+
+    nlock run --replace deploy -- ./deploy.sh "$newrev"
 
 Run a shell pipeline under a lock:
 

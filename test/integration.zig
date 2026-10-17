@@ -508,6 +508,97 @@ test "a queued client is told who holds the lock before it waits" {
     try std.testing.expectEqual(nlock.LockResponseStatus.ok, std.meta.activeTag(acquired_parsed.value));
 }
 
+test "--coalesce queues if nothing is pending, and otherwise exits 0 without running" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const log_path = try daemon.tmpPath(gpa, "log");
+    defer gpa.free(log_path);
+    var holder = try HeldLock.start(gpa, io, daemon, "build");
+    defer holder.finish(io) catch {};
+
+    // Nothing is pending yet, so the first request queues as usual.
+    const script_1 = try std.fmt.allocPrint(gpa, "echo first >> {s}", .{log_path});
+    defer gpa.free(script_1);
+    var first = try daemon.spawnClient(gpa, io, &.{ "run", "--coalesce", "build", "--", "sh", "-c", script_1 });
+    var first_done = false;
+    defer if (!first_done) first.kill(io);
+    try waitForWaiters(gpa, io, daemon, "build", 1);
+
+    // A run is pending now, so the second request returns at once.
+    const script_2 = try std.fmt.allocPrint(gpa, "echo second >> {s}", .{log_path});
+    defer gpa.free(script_2);
+    const second = try daemon.client(gpa, io, &.{ "run", "--coalesce", "build", "--", "sh", "-c", script_2 });
+    defer gpa.free(second.stdout);
+    defer gpa.free(second.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, second.term);
+    try waitForWaiters(gpa, io, daemon, "build", 1);
+
+    try holder.finish(io);
+    first_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try first.wait(io));
+    try expectFileContents(gpa, io, daemon.tmp.dir, "log", "first\n");
+}
+
+test "--replace takes the place of every waiter, which exit 0 without running" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const log_path = try daemon.tmpPath(gpa, "log");
+    defer gpa.free(log_path);
+    var holder = try HeldLock.start(gpa, io, daemon, "deploy");
+    defer holder.finish(io) catch {};
+
+    var waiters: [2]std.process.Child = undefined;
+    var waiters_done = [_]bool{ false, false };
+    defer for (&waiters, waiters_done) |*waiter, done| if (!done) waiter.kill(io);
+    // One waits with a timeout and one without, since the daemon waits for
+    // them differently.
+    for (&waiters, [_][]const u8{ "v1", "v2" }, [_][]const u8{ "-t", "--global" }, [_][]const u8{ "30", "--global" }, 1..) |*waiter, version, flag, value, count| {
+        const script = try std.fmt.allocPrint(gpa, "echo {s} >> {s}", .{ version, log_path });
+        defer gpa.free(script);
+        waiter.* = try daemon.spawnClient(gpa, io, &.{ "run", flag, value, "deploy", "--", "sh", "-c", script });
+        try waitForWaiters(gpa, io, daemon, "deploy", count);
+    }
+
+    const script = try std.fmt.allocPrint(gpa, "echo v3 >> {s}", .{log_path});
+    defer gpa.free(script);
+    var newest = try daemon.spawnClient(gpa, io, &.{ "run", "--replace", "deploy", "--", "sh", "-c", script });
+    var newest_done = false;
+    defer if (!newest_done) newest.kill(io);
+
+    // The replaced clients give up while the lock is still held.
+    for (&waiters, &waiters_done) |*waiter, *done| {
+        done.* = true;
+        try std.testing.expectEqual(Term{ .exited = 0 }, try waiter.wait(io));
+    }
+    try waitForWaiters(gpa, io, daemon, "deploy", 1);
+
+    try holder.finish(io);
+    newest_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try newest.wait(io));
+    try expectFileContents(gpa, io, daemon.tmp.dir, "log", "v3\n");
+}
+
+test "run rejects --coalesce with --replace" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const result = try daemon.client(gpa, io, &.{ "run", "--coalesce", "--replace", "mylock", "--", "true" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = @intFromEnum(nlock.SysExits.usage) }, result.term);
+}
+
 test "client fails when no daemon is running" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -572,4 +663,56 @@ fn waitForListOutput(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon
         }
         try io.sleep(.fromMilliseconds(10), .awake);
     }
+}
+
+/// A client holding a lock until `finish` is called.
+const HeldLock = struct {
+    child: std.process.Child,
+    daemon: *harness.Daemon,
+    done: bool = false,
+
+    /// Starts a client that holds `name`, and waits until it does.
+    fn start(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon, name: []const u8) !HeldLock {
+        const go_path = try daemon.tmpPath(gpa, "go");
+        defer gpa.free(go_path);
+        const script = try std.fmt.allocPrint(gpa, "while [ ! -f {s} ]; do sleep 0.01; done", .{go_path});
+        defer gpa.free(script);
+
+        var child = try daemon.spawnClient(gpa, io, &.{ "run", name, "--", "sh", "-c", script });
+        errdefer child.kill(io);
+        try waitForWaiters(gpa, io, daemon, name, 0);
+        return .{ .child = child, .daemon = daemon };
+    }
+
+    /// Lets the command finish, so the lock passes to the next waiter.
+    fn finish(self: *HeldLock, io: std.Io) !void {
+        if (self.done) return;
+        self.done = true;
+        try self.daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
+        try std.testing.expectEqual(Term{ .exited = 0 }, try self.child.wait(io));
+    }
+};
+
+/// Polls `nlock list --json` until lock `name` is held with exactly
+/// `expected` waiters, or gives up after roughly five seconds.
+fn waitForWaiters(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon, name: []const u8, expected: usize) !void {
+    var attempts: usize = 0;
+    while (attempts < 500) : (attempts += 1) {
+        const result = try daemon.client(gpa, io, &.{ "list", "--json" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        var lines = std.mem.tokenizeScalar(u8, result.stdout, '\n');
+        while (lines.next()) |line| {
+            const parsed = try std.json.parseFromSlice(
+                struct { name: []const u8, waiters: usize },
+                gpa,
+                line,
+                .{ .ignore_unknown_fields = true },
+            );
+            defer parsed.deinit();
+            if (std.mem.eql(u8, name, parsed.value.name) and parsed.value.waiters == expected) return;
+        }
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+    return error.WaitersNeverMatched;
 }

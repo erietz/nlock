@@ -1,9 +1,40 @@
 const std = @import("std");
 
-pub const USAGE =
-    \\Usage: nlock run <name> [--global] -- <command> [args...]
+const SYNOPSIS =
+    \\Usage: nlock run [options] <name> -- <command> [args...]
     \\       nlock list [--json | -q] [-H]
-    \\       nlock --version
+    \\       nlock --help | --version
+    \\
+;
+
+/// Printed to stderr when the arguments are invalid.
+pub const USAGE = SYNOPSIS ++
+    \\Try 'nlock --help' for more information.
+    \\
+;
+
+/// Printed to stdout for `nlock --help`.
+pub const HELP = SYNOPSIS ++
+    \\
+    \\Run a command while holding a named lock managed by nlockd.
+    \\
+    \\Run options:
+    \\  -g, --global          request a global lock (currently has no effect)
+    \\  -n, --nonblock        fail at once if the lock is held
+    \\  -t, --timeout <secs>  wait at most <secs> seconds for the lock
+    \\      --coalesce        exit 0 without running if a run is already pending
+    \\      --replace         take the place of every client waiting for the lock
+    \\
+    \\List options:
+    \\      --json            print one JSON object per lock
+    \\  -q, --quiet           print only lock names
+    \\  -H, --no-header       omit the header row
+    \\
+    \\Other options:
+    \\  -h, --help            show this help
+    \\      --version         show the version
+    \\
+    \\See nlock(1) for details.
     \\
 ;
 
@@ -14,6 +45,7 @@ pub const UsageError = error{
 pub const Command = union(enum) {
     run: RunOptions,
     list: ListOptions,
+    help,
     version,
 
     pub fn parseArgs(args: []const [:0]const u8) UsageError!Command {
@@ -21,9 +53,14 @@ pub const Command = union(enum) {
             return UsageError.InvalidArguments; // No subcommand provided
         }
 
-        // If --version appears anywhere in the arguments, treat it as a
-        // request for version info
-        for (args) |arg| {
+        // --help or --version anywhere among nlock's own arguments wins over
+        // everything else. Arguments after `--` belong to the command, so
+        // `nlock run x -- grep -h` still runs grep.
+        for (args[1..]) |arg| {
+            if (std.mem.eql(u8, arg, "--")) break;
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                return .{ .help = {} };
+            }
             if (std.mem.eql(u8, arg, "--version")) {
                 return .{ .version = {} };
             }
@@ -88,8 +125,10 @@ pub const RunOptions = struct {
     command: []const [:0]const u8,
     nonblock: bool = false,
     timeout: ?u64 = null,
+    coalesce: bool = false,
+    replace: bool = false,
 
-    /// Parses the arguments following `run`: `<name> [--global] -- <command> [args...]`
+    /// Parses the arguments following `run`: `[options] <name> -- <command> [args...]`
     pub fn parseArgs(args: []const [:0]const u8) !RunOptions {
         var options = RunOptions{
             .global = false,
@@ -97,6 +136,8 @@ pub const RunOptions = struct {
             .command = &.{},
             .nonblock = false,
             .timeout = null,
+            .coalesce = false,
+            .replace = false,
         };
 
         const double_dash_index = for (args, 0..) |arg, i| {
@@ -131,6 +172,10 @@ pub const RunOptions = struct {
                 };
                 options.timeout = timeout_value;
                 skip_next = true; // Skip the next argument since it's the value for --timeout
+            } else if (std.mem.eql(u8, arg, "--coalesce")) {
+                options.coalesce = true;
+            } else if (std.mem.eql(u8, arg, "--replace")) {
+                options.replace = true;
             } else if (options.name.len == 0) {
                 options.name = arg;
             } else {
@@ -140,6 +185,10 @@ pub const RunOptions = struct {
 
         if (!isValidLockName(options.name)) {
             return error.InvalidArguments; // No name, or name has whitespace or control characters
+        }
+
+        if (options.coalesce and options.replace) {
+            return error.InvalidArguments; // Conflicting flags
         }
 
         return options;
@@ -180,6 +229,27 @@ test "Command.parseArgs version with extra arguments" {
     const args: []const [:0]const u8 = &.{ "nlock", "--version", "extra" };
     const result = try Command.parseArgs(args);
     try std.testing.expectEqual(Command{ .version = {} }, result);
+}
+
+test "Command.parseArgs help" {
+    for ([_][]const [:0]const u8{
+        &.{ "nlock", "--help" },
+        &.{ "nlock", "-h" },
+        &.{ "nlock", "run", "-h" },
+        &.{ "nlock", "list", "--json", "--help" },
+        &.{ "nlock", "run", "mylock", "--help", "--", "echo" },
+    }) |args| {
+        try std.testing.expectEqual(Command{ .help = {} }, try Command.parseArgs(args));
+    }
+}
+
+test "Command.parseArgs leaves --help and --version after -- to the command" {
+    for ([_][:0]const u8{ "--help", "-h", "--version" }) |flag| {
+        const args: []const [:0]const u8 = &.{ "nlock", "run", "mylock", "--", "grep", flag };
+        const result = try Command.parseArgs(args);
+        try std.testing.expectEqualStrings("mylock", result.run.name);
+        try std.testing.expectEqual(2, result.run.command.len);
+    }
 }
 
 test "Command.parseArgs version with run subcommand" {
@@ -298,6 +368,36 @@ test "RunOptions.parseArgs with timeout flag" {
     try std.testing.expectEqual(30, result.timeout.?);
     const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
     try std.testing.expectEqualDeep(expected_command, result.command);
+}
+
+test "RunOptions.parseArgs with coalesce flag" {
+    const args: []const [:0]const u8 = &.{ "--coalesce", "mylock", "--", "echo", "Hello" };
+    const result = try RunOptions.parseArgs(args);
+    try std.testing.expectEqualStrings("mylock", result.name);
+    try std.testing.expectEqual(false, result.global);
+    try std.testing.expectEqual(false, result.nonblock);
+    try std.testing.expectEqual(null, result.timeout);
+    try std.testing.expectEqual(true, result.coalesce);
+    const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
+    try std.testing.expectEqualDeep(expected_command, result.command);
+}
+
+test "RunOptions.parseArgs with replace flag" {
+    const args: []const [:0]const u8 = &.{ "--replace", "mylock", "--", "echo", "Hello" };
+    const result = try RunOptions.parseArgs(args);
+    try std.testing.expectEqualStrings("mylock", result.name);
+    try std.testing.expectEqual(false, result.global);
+    try std.testing.expectEqual(false, result.nonblock);
+    try std.testing.expectEqual(null, result.timeout);
+    try std.testing.expectEqual(true, result.replace);
+    const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
+    try std.testing.expectEqualDeep(expected_command, result.command);
+}
+
+test "RunOptions.parseArgs with both coalesce and replace flags should error" {
+    const args: []const [:0]const u8 = &.{ "--coalesce", "--replace", "mylock", "--", "echo", "Hello" };
+    const result = RunOptions.parseArgs(args);
+    try std.testing.expectError(error.InvalidArguments, result);
 }
 
 test "RunOptions.parseArgs with flags after positional arguments" {

@@ -39,11 +39,18 @@ pub fn run(init: std.process.Init) !u8 {
         },
     };
 
-    // No need to connect to the daemon for `version`, so do it first to avoid
-    // unnecessary errors if the daemon is not running.
-    if (command == .version) {
-        printVersion() catch nlock.SysExits.oserr.exit();
-        nlock.SysExits.ok.exit();
+    // No need to connect to the daemon for `help` or `version`, so do them
+    // first to avoid unnecessary errors if the daemon is not running.
+    switch (command) {
+        .help => {
+            nlock.printer.print("{s}", .{nlock.cli.HELP}) catch nlock.SysExits.oserr.exit();
+            nlock.SysExits.ok.exit();
+        },
+        .version => {
+            printVersion() catch nlock.SysExits.oserr.exit();
+            nlock.SysExits.ok.exit();
+        },
+        .run, .list => {},
     }
 
     const socket_path = try nlock.getSocketPath(init.gpa, init.environ_map);
@@ -120,10 +127,8 @@ pub fn run(init: std.process.Init) !u8 {
             try runList(ctx, options);
             return 0;
         },
-        .version => {
-            printVersion() catch nlock.SysExits.oserr.exit();
-            return 0;
-        },
+        // Handled before connecting.
+        .help, .version => unreachable,
     }
 }
 
@@ -144,16 +149,16 @@ fn verifyServer(stream: std.Io.net.Stream) !void {
 
 /// Runs the command under the lock and returns its exit status.
 pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
-    // Only explain a wait to a person: scripts and cron jobs would just get
-    // noise on stderr.
-    const report_queued = Io.File.stderr().isTty(ctx.io) catch false;
+    // Only explain a wait, or not running, to a person: scripts and cron jobs
+    // would just get noise on stderr.
+    const report = Io.File.stderr().isTty(ctx.io) catch false;
     const acquire_status = try acquireLock(
         ctx.io,
         ctx.allocator,
         ctx.writer,
         ctx.reader,
         options,
-        report_queued,
+        report,
     );
 
     switch (acquire_status) {
@@ -182,6 +187,12 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
         },
         nlock.LockResponseStatus.timeout => {
             return RunLockedError.LockAcquireTimeout;
+        },
+        // A run is pending that will start after this request was made,
+        // which is what the caller asked for, so this is success.
+        nlock.LockResponseStatus.coalesced, nlock.LockResponseStatus.replaced => {
+            log(ll.Debug, "Not running the command: {s}", .{@tagName(acquire_status)});
+            return 0;
         },
         // acquireLock reads past queued to the final status.
         nlock.LockResponseStatus.queued => unreachable,
@@ -433,16 +444,17 @@ test "formatLockInfoTable prints only the header when no locks are held" {
     try std.testing.expectEqualStrings("", try formatLockInfoTable(arena, &.{}, false, 0));
 }
 
-/// Requests the lock and waits for the daemon's answer: ok, busy or timeout.
-/// If the lock is held by someone else, first prints who holds it to stderr
-/// when `report_queued` is set.
+/// Requests the lock and waits for the daemon's answer: ok, busy, timeout,
+/// coalesced or replaced. When `report` is set, explains on stderr who holds
+/// the lock before waiting for it, and why the command will not run if the
+/// request was coalesced or replaced.
 pub fn acquireLock(
     io: Io,
     allocator: std.mem.Allocator,
     writer: *Io.Writer,
     reader: *Io.Reader,
     options: nlock.cli.RunOptions,
-    report_queued: bool,
+    report: bool,
 ) !nlock.LockResponseStatus {
     const command_str = std.mem.join(allocator, " ", options.command) catch {
         log(ll.Error, "Failed to join command arguments", .{});
@@ -455,32 +467,89 @@ pub fn acquireLock(
         .nonblock = options.nonblock,
         .timeout = options.timeout,
         .command = command_str,
+        .if_pending = if (options.coalesce) .skip else if (options.replace) .replace else .queue,
     } }).toJson(allocator);
     defer allocator.free(message);
-
     try nlock.writeLine(writer, message);
 
+    // Every response but queued is final.
     while (true) {
         const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
         log(ll.Debug, "Received lock response: {s}", .{response_message});
         const parsed = try nlock.LockResponse.fromJson(response_message, allocator);
         defer parsed.deinit();
-        const queued = switch (parsed.value) {
-            .queued => |queued| queued,
-            else => return std.meta.activeTag(parsed.value),
-        };
-        if (!report_queued) continue;
+        const status = std.meta.activeTag(parsed.value);
 
-        var arena_state = std.heap.ArenaAllocator.init(allocator);
-        defer arena_state.deinit();
-        const queued_message = try formatQueuedMessage(
-            arena_state.allocator(),
-            queued.holder,
-            queued.ahead,
-            nowSeconds(io),
-        );
-        nlock.printer.eprint("{s}", .{queued_message}) catch {};
+        if (report) {
+            var arena_state = std.heap.ArenaAllocator.init(allocator);
+            defer arena_state.deinit();
+            const arena = arena_state.allocator();
+            const explanation: ?[]const u8 = switch (parsed.value) {
+                .queued => |queued| try formatQueuedMessage(arena, queued.holder, queued.ahead, nowSeconds(io)),
+                .coalesced => |coalesced| try formatCoalescedMessage(arena, options.name, coalesced),
+                .replaced => |replaced| try formatReplacedMessage(arena, options.name, replaced),
+                .ok, .busy, .timeout => null,
+            };
+            if (explanation) |m| nlock.printer.eprint("{s}", .{m}) catch {};
+        }
+
+        if (status != .queued) return status;
     }
+}
+
+/// The line printed when the request was coalesced into a run that is
+/// already pending, e.g.
+/// `nlock: 'rebuild' already has a pending run by alice (pid 4321): make; not queueing`
+fn formatCoalescedMessage(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    coalesced: nlock.LockResponse.Coalesced,
+) ![]const u8 {
+    const pending = coalesced.pending;
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(allocator, "nlock: '");
+    try appendEscaped(allocator, &out, name);
+    try out.print(allocator, "' already has a pending run by {s}", .{try userNameAlloc(allocator, pending.uid)});
+    if (pending.pid > 0) try out.print(allocator, " (pid {d})", .{pending.pid});
+    try out.appendSlice(allocator, ": ");
+    try appendEscaped(allocator, &out, pending.command);
+    try out.appendSlice(allocator, "; not queueing\n");
+    return out.items;
+}
+
+/// The line printed when a newer request took this one's place in the
+/// queue, e.g.
+/// `nlock: replaced in the queue for 'deploy' by a newer request from alice (pid 4321)`
+fn formatReplacedMessage(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    replaced: nlock.LockResponse.Replaced,
+) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(allocator, "nlock: replaced in the queue for '");
+    try appendEscaped(allocator, &out, name);
+    try out.print(allocator, "' by a newer request from {s}", .{try userNameAlloc(allocator, replaced.uid)});
+    if (replaced.pid > 0) try out.print(allocator, " (pid {d})", .{replaced.pid});
+    try out.append(allocator, '\n');
+    return out.items;
+}
+
+test "formatCoalescedMessage and formatReplacedMessage" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expectEqualStrings(
+        "nlock: 'rebuild' already has a pending run by 4000000000 (pid 4321): make -j8; not queueing\n",
+        try formatCoalescedMessage(arena, "rebuild", .{
+            .pending = .{ .uid = 4000000000, .pid = 4321, .command = "make -j8" },
+            .waiters = 1,
+        }),
+    );
+    try std.testing.expectEqualStrings(
+        "nlock: replaced in the queue for 'deploy' by a newer request from 4000000000\n",
+        try formatReplacedMessage(arena, "deploy", .{ .uid = 4000000000, .pid = 0 }),
+    );
 }
 
 /// The line printed while waiting for a lock held by someone else, e.g.
