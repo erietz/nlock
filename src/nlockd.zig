@@ -211,7 +211,7 @@ fn handleConnection(
     var writer = stream.writer(io, &write_buffer);
 
     // Ask the kernel who is on the other end of the socket rather than
-    // trusting a uid sent by the client.
+    // trusting a pid sent by the client.
     const peer = nlock.peer.peerCredentials(stream) catch |err| {
         log(ll.Error, "Failed to get peer credentials: {s}", .{@errorName(err)});
         return err;
@@ -294,11 +294,10 @@ fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !std.json.Parse
 }
 
 test "readRequest parses a valid LockRequest where command contains newlines" {
-    const message = "{\"acquire\":{\"name\":\"my_lock\",\"global\":false,\"nonblock\":false,\"timeout\":null,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}}\n";
+    const message = "{\"acquire\":{\"name\":\"my_lock\",\"nonblock\":false,\"timeout\":null,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}}\n";
     const allocator = std.testing.allocator;
     const expected_request: nlock.LockRequest.Acquire = .{
         .name = "my_lock",
-        .global = false,
         .nonblock = false,
         .timeout = null,
         .command = "echo 'Hello, World!'\necho 'This is a test.'\n",
@@ -310,7 +309,6 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     const request = parsed.value.acquire;
 
     try std.testing.expectEqualStrings(expected_request.name, request.name);
-    try std.testing.expectEqual(expected_request.global, request.global);
     try std.testing.expectEqual(expected_request.nonblock, request.nonblock);
     try std.testing.expectEqualStrings(expected_request.command, request.command);
 }
@@ -340,7 +338,7 @@ fn handleAcquireLockRequest(
             // Serialized while holding the mutex: the waiter and its command
             // may be gone as soon as it is released.
             const coalesced_response = (nlock.LockResponse{ .coalesced = .{
-                .pending = .{ .uid = pending.uid, .pid = pending.pid, .command = pending.command },
+                .pending = .{ .pid = pending.pid, .command = pending.command },
                 .waiters = existing_lock.waiters.len(),
             } }).toJson(allocator) catch |err| {
                 map.unlock();
@@ -374,9 +372,7 @@ fn handleAcquireLockRequest(
         const queued_response = (nlock.LockResponse{ .queued = .{
             .holder = .{
                 .name = lock_request.name,
-                .uid = existing_lock.uid,
                 .pid = existing_lock.pid,
-                .global = existing_lock.global,
                 .waiters = ahead + 1,
                 .acquired_at = existing_lock.acquired_at,
                 .command = existing_lock.command,
@@ -392,9 +388,7 @@ fn handleAcquireLockRequest(
         var waiter = nlock.Waiter{
             .event = .unset,
             .command = command_copy,
-            .uid = peer.uid,
             .pid = peer.pid,
-            .global = lock_request.global,
         };
         if (replace) {
             // Every waiter is an older request for the same job, so take
@@ -402,7 +396,7 @@ fn handleAcquireLockRequest(
             var replaced_count: usize = 0;
             while (existing_lock.waiters.popFirst()) |node| : (replaced_count += 1) {
                 const replaced: *nlock.Waiter = @fieldParentPtr("node", node);
-                replaced.replaced_by = .{ .uid = peer.uid, .pid = peer.pid };
+                replaced.replaced_by = peer.pid;
                 replaced.event.set(io);
             }
             log(ll.Info, "Replaced {d} waiter(s) for lock '{s}'", .{ replaced_count, lock_request.name });
@@ -465,14 +459,13 @@ fn handleAcquireLockRequest(
             };
         }
 
-        if (waiter.replaced_by) |by| {
+        if (waiter.replaced_by) |by_pid| {
             // Taken out of the queue, so the command was never handed to
             // the lock and is still ours.
             allocator.free(command_copy);
-            log(ll.Info, "Waiter for lock '{s}' was replaced by pid {d}", .{ lock_request.name, by.pid });
+            log(ll.Info, "Waiter for lock '{s}' was replaced by pid {d}", .{ lock_request.name, by_pid });
             const replaced_response = try (nlock.LockResponse{ .replaced = .{
-                .uid = by.uid,
-                .pid = by.pid,
+                .pid = by_pid,
             } }).toJson(allocator);
             defer allocator.free(replaced_response);
             try nlock.writeLine(writer, replaced_response);
@@ -497,9 +490,7 @@ fn handleAcquireLockRequest(
 
         const lock = nlock.Lock{
             .command = command_copy,
-            .uid = peer.uid,
             .pid = peer.pid,
-            .global = lock_request.global,
             .acquired_at = nowSeconds(io),
         };
 
@@ -511,11 +502,10 @@ fn handleAcquireLockRequest(
         };
         map.unlock();
 
-        log(ll.Info, "Acquired lock for name '{s}' (uid: {d}, pid: {d}, global: {}). Command: {s}", .{
+        log(ll.Info, "Acquired lock for name '{s}' (uid: {d}, pid: {d}). Command: {s}", .{
             lock_request.name,
             peer.uid,
             peer.pid,
-            lock_request.global,
             lock_request.command,
         });
     }
@@ -597,9 +587,7 @@ fn releaseLock(
         allocator.free(lock_ptr.command);
         // The lock now belongs to the waiter
         lock_ptr.command = w.command;
-        lock_ptr.uid = w.uid;
         lock_ptr.pid = w.pid;
-        lock_ptr.global = w.global;
         lock_ptr.acquired_at = nowSeconds(io);
         // Signal the waiter that the lock has been released
         w.event.set(io);
@@ -638,9 +626,7 @@ fn handleListLocksRequest(
             const lock = entry.value_ptr;
             const line = try (nlock.LockInfo{
                 .name = entry.key_ptr.*,
-                .uid = lock.uid,
                 .pid = lock.pid,
-                .global = lock.global,
                 .waiters = lock.waiters.len(),
                 .acquired_at = lock.acquired_at,
                 .command = lock.command,

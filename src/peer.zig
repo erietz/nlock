@@ -51,24 +51,3 @@ pub fn peerCredentials(stream: std.Io.net.Stream) !Credentials {
         return .{ .uid = uid, .pid = pid };
     }
 }
-
-/// Returns the username for `uid`, or the uid formatted into `buf` if it has
-/// no passwd entry. The returned name points into libc's static storage and
-/// is only valid until the next `getpwuid` call.
-pub fn userName(buf: []u8, uid: Uid) []const u8 {
-    if (c.getpwuid(uid)) |pw| {
-        if (pw.name) |name| return std.mem.span(name);
-    }
-    return std.fmt.bufPrint(buf, "{d}", .{uid}) catch "?";
-}
-
-test "userName resolves the current user" {
-    var buf: [16]u8 = undefined;
-    const name = userName(&buf, c.getuid());
-    try std.testing.expect(name.len > 0);
-}
-
-test "userName falls back to the numeric uid" {
-    var buf: [16]u8 = undefined;
-    try std.testing.expectEqualStrings("4000000000", userName(&buf, 4000000000));
-}

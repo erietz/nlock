@@ -247,29 +247,12 @@ fn readLockInfos(
     return lock_infos;
 }
 
-/// Resolves `uid` to a username, or its decimal form if it has no passwd
-/// entry. getpwuid returns static storage, so the name is copied.
-fn userNameAlloc(allocator: std.mem.Allocator, uid: u32) ![]const u8 {
-    var uid_buf: [16]u8 = undefined;
-    return allocator.dupe(u8, nlock.peer.userName(&uid_buf, uid));
-}
-
 /// `nlock list --json`: one JSON object per lock, one per line. Unlike the
 /// table, this round-trips arbitrary names and commands exactly.
 fn formatLockInfoJson(allocator: std.mem.Allocator, lock_infos: []const nlock.LockInfo) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (lock_infos) |lock_info| {
-        const json = try std.json.Stringify.valueAlloc(allocator, .{
-            .name = lock_info.name,
-            .user = try userNameAlloc(allocator, lock_info.uid),
-            .uid = lock_info.uid,
-            .pid = lock_info.pid,
-            .global = lock_info.global,
-            .waiters = lock_info.waiters,
-            .acquired_at = lock_info.acquired_at,
-            .command = lock_info.command,
-        }, .{ .whitespace = .minified });
-        try out.appendSlice(allocator, json);
+        try out.appendSlice(allocator, try lock_info.toJson(allocator));
         try out.append(allocator, '\n');
     }
     return out.items;
@@ -294,9 +277,7 @@ const Column = struct {
 /// every other column can be split on whitespace.
 const columns = [_]Column{
     .{ .title = "NAME" },
-    .{ .title = "USER" },
     .{ .title = "PID", .align_right = true },
-    .{ .title = "SCOPE" },
     .{ .title = "ELAPSED", .align_right = true },
     .{ .title = "WAITERS", .align_right = true },
     .{ .title = "CMD" },
@@ -328,9 +309,7 @@ fn formatLockInfoTable(
 
         try rows.append(allocator, .{
             name.items,
-            try userNameAlloc(allocator, lock_info.uid),
             if (lock_info.pid > 0) try std.fmt.allocPrint(allocator, "{d}", .{lock_info.pid}) else "-",
-            if (lock_info.global) "global" else "user",
             try formatElapsed(allocator, now - lock_info.acquired_at),
             try std.fmt.allocPrint(allocator, "{d}", .{lock_info.waiters}),
             command.items,
@@ -417,19 +396,19 @@ test "formatLockInfoTable aligns columns and leaves CMD last and unpadded" {
     const arena = arena_state.allocator();
 
     const lock_infos = [_]nlock.LockInfo{
-        .{ .name = "build", .uid = 4000000000, .pid = 123, .global = false, .waiters = 0, .acquired_at = 1000, .command = "make -j8" },
-        .{ .name = "deploy-prod", .uid = 4000000001, .pid = 0, .global = true, .waiters = 12, .acquired_at = 0, .command = "sh -c 'a\nb'" },
+        .{ .name = "build", .pid = 123, .waiters = 0, .acquired_at = 1000, .command = "make -j8" },
+        .{ .name = "deploy-prod", .pid = 0, .waiters = 12, .acquired_at = 0, .command = "sh -c 'a\nb'" },
     };
     const table = try formatLockInfoTable(arena, &lock_infos, true, 1065);
     try std.testing.expectEqualStrings(
-        \\NAME         USER        PID  SCOPE   ELAPSED  WAITERS  CMD
-        \\build        4000000000  123  user      01:05        0  make -j8
-        \\deploy-prod  4000000001    -  global    17:45       12  sh -c 'a\nb'
+        \\NAME         PID  ELAPSED  WAITERS  CMD
+        \\build        123    01:05        0  make -j8
+        \\deploy-prod    -    17:45       12  sh -c 'a\nb'
         \\
     , table);
 
     const no_header = try formatLockInfoTable(arena, lock_infos[0..1], false, 1065);
-    try std.testing.expectEqualStrings("build  4000000000  123  user  01:05  0  make -j8\n", no_header);
+    try std.testing.expectEqualStrings("build  123  01:05  0  make -j8\n", no_header);
 }
 
 test "formatLockInfoTable prints only the header when no locks are held" {
@@ -438,7 +417,7 @@ test "formatLockInfoTable prints only the header when no locks are held" {
     const arena = arena_state.allocator();
 
     try std.testing.expectEqualStrings(
-        "NAME  USER  PID  SCOPE  ELAPSED  WAITERS  CMD\n",
+        "NAME  PID  ELAPSED  WAITERS  CMD\n",
         try formatLockInfoTable(arena, &.{}, true, 0),
     );
     try std.testing.expectEqualStrings("", try formatLockInfoTable(arena, &.{}, false, 0));
@@ -463,7 +442,6 @@ pub fn acquireLock(
     defer allocator.free(command_str);
     const message = try (nlock.LockRequest{ .acquire = .{
         .name = options.name,
-        .global = options.global,
         .nonblock = options.nonblock,
         .timeout = options.timeout,
         .command = command_str,
@@ -499,7 +477,7 @@ pub fn acquireLock(
 
 /// The line printed when the request was coalesced into a run that is
 /// already pending, e.g.
-/// `nlock: 'rebuild' already has a pending run by alice (pid 4321): make; not queueing`
+/// `nlock: 'rebuild' already has a pending run (pid 4321): make; not queueing`
 fn formatCoalescedMessage(
     allocator: std.mem.Allocator,
     name: []const u8,
@@ -509,7 +487,7 @@ fn formatCoalescedMessage(
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(allocator, "nlock: '");
     try appendEscaped(allocator, &out, name);
-    try out.print(allocator, "' already has a pending run by {s}", .{try userNameAlloc(allocator, pending.uid)});
+    try out.appendSlice(allocator, "' already has a pending run");
     if (pending.pid > 0) try out.print(allocator, " (pid {d})", .{pending.pid});
     try out.appendSlice(allocator, ": ");
     try appendEscaped(allocator, &out, pending.command);
@@ -519,7 +497,7 @@ fn formatCoalescedMessage(
 
 /// The line printed when a newer request took this one's place in the
 /// queue, e.g.
-/// `nlock: replaced in the queue for 'deploy' by a newer request from alice (pid 4321)`
+/// `nlock: replaced in the queue for 'deploy' by a newer request (pid 4321)`
 fn formatReplacedMessage(
     allocator: std.mem.Allocator,
     name: []const u8,
@@ -528,7 +506,7 @@ fn formatReplacedMessage(
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(allocator, "nlock: replaced in the queue for '");
     try appendEscaped(allocator, &out, name);
-    try out.print(allocator, "' by a newer request from {s}", .{try userNameAlloc(allocator, replaced.uid)});
+    try out.appendSlice(allocator, "' by a newer request");
     if (replaced.pid > 0) try out.print(allocator, " (pid {d})", .{replaced.pid});
     try out.append(allocator, '\n');
     return out.items;
@@ -540,20 +518,20 @@ test "formatCoalescedMessage and formatReplacedMessage" {
     const arena = arena_state.allocator();
 
     try std.testing.expectEqualStrings(
-        "nlock: 'rebuild' already has a pending run by 4000000000 (pid 4321): make -j8; not queueing\n",
+        "nlock: 'rebuild' already has a pending run (pid 4321): make -j8; not queueing\n",
         try formatCoalescedMessage(arena, "rebuild", .{
-            .pending = .{ .uid = 4000000000, .pid = 4321, .command = "make -j8" },
+            .pending = .{ .pid = 4321, .command = "make -j8" },
             .waiters = 1,
         }),
     );
     try std.testing.expectEqualStrings(
-        "nlock: replaced in the queue for 'deploy' by a newer request from 4000000000\n",
-        try formatReplacedMessage(arena, "deploy", .{ .uid = 4000000000, .pid = 0 }),
+        "nlock: replaced in the queue for 'deploy' by a newer request\n",
+        try formatReplacedMessage(arena, "deploy", .{ .pid = 0 }),
     );
 }
 
 /// The line printed while waiting for a lock held by someone else, e.g.
-/// `nlock: waiting for 'db' — held by alice (pid 4242) for 02:13: ./migrate --up (2 ahead of you)`
+/// `nlock: waiting for 'db' — held by pid 4242 for 02:13: ./migrate --up (2 ahead of you)`
 fn formatQueuedMessage(
     allocator: std.mem.Allocator,
     holder: nlock.LockInfo,
@@ -563,8 +541,8 @@ fn formatQueuedMessage(
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(allocator, "nlock: waiting for '");
     try appendEscaped(allocator, &out, holder.name);
-    try out.print(allocator, "' — held by {s}", .{try userNameAlloc(allocator, holder.uid)});
-    if (holder.pid > 0) try out.print(allocator, " (pid {d})", .{holder.pid});
+    try out.appendSlice(allocator, "' — held");
+    if (holder.pid > 0) try out.print(allocator, " by pid {d}", .{holder.pid});
     try out.print(allocator, " for {s}: ", .{try formatElapsed(allocator, now - holder.acquired_at)});
     try appendEscaped(allocator, &out, holder.command);
     if (ahead == 0) {
@@ -580,9 +558,9 @@ test "formatQueuedMessage" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const holder: nlock.LockInfo = .{ .name = "db", .uid = 4000000000, .pid = 4242, .global = false, .waiters = 3, .acquired_at = 1000, .command = "./migrate --up" };
+    const holder: nlock.LockInfo = .{ .name = "db", .pid = 4242, .waiters = 3, .acquired_at = 1000, .command = "./migrate --up" };
     try std.testing.expectEqualStrings(
-        "nlock: waiting for 'db' — held by 4000000000 (pid 4242) for 02:13: ./migrate --up (2 ahead of you)\n",
+        "nlock: waiting for 'db' — held by pid 4242 for 02:13: ./migrate --up (2 ahead of you)\n",
         try formatQueuedMessage(arena, holder, 2, 1133),
     );
 
@@ -590,7 +568,7 @@ test "formatQueuedMessage" {
     unknown_pid.pid = 0;
     unknown_pid.command = "sh -c 'a\nb'";
     try std.testing.expectEqualStrings(
-        "nlock: waiting for 'db' — held by 4000000000 for 00:00: sh -c 'a\\nb' (next in line)\n",
+        "nlock: waiting for 'db' — held for 00:00: sh -c 'a\\nb' (next in line)\n",
         try formatQueuedMessage(arena, unknown_pid, 0, 1000),
     );
 }
