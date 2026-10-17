@@ -11,7 +11,7 @@ Documentation=man:nlockd(1)
 [Service]
 ExecStart=@bindir@/nlockd
 Restart=on-failure
-Environment=NLOCK_LOG_LEVEL=Debug
+Environment=NLOCK_LOG_LEVEL=info
 
 [Install]
 WantedBy=default.target

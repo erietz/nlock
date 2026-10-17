@@ -1,4 +1,5 @@
 const std = @import("std");
+const max_name_len = @import("protocol.zig").max_name_len;
 
 const SYNOPSIS =
     \\Usage: nlock run [options] <name> -- <command> [args...]
@@ -111,7 +112,7 @@ pub const ListOptions = struct {
 /// characters are rejected so names stay a single field in `nlock list`
 /// output.
 pub fn isValidLockName(name: []const u8) bool {
-    if (name.len == 0) return false;
+    if (name.len == 0 or name.len > max_name_len) return false;
     for (name) |ch| {
         if (std.ascii.isWhitespace(ch) or std.ascii.isControl(ch)) return false;
     }
@@ -458,4 +459,6 @@ test "isValidLockName" {
     try std.testing.expect(!isValidLockName("a b"));
     try std.testing.expect(!isValidLockName("a\tb"));
     try std.testing.expect(!isValidLockName("a\nb"));
+    try std.testing.expect(isValidLockName("x" ** max_name_len));
+    try std.testing.expect(!isValidLockName("x" ** (max_name_len + 1)));
 }

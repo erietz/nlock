@@ -2,7 +2,12 @@ const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
 const log = nlock.logger.log;
-const ll = nlock.logger.LogLevel;
+
+pub const std_options: std.Options = .{
+    // Release builds would otherwise compile out debug messages, leaving
+    // NLOCK_LOG_LEVEL=Debug no effect. NLOCK_LOG_LEVEL does the filtering.
+    .log_level = .debug,
+};
 
 const Context = struct {
     io: Io,
@@ -19,7 +24,7 @@ const RunLockedError = error{
 
 pub fn main(init: std.process.Init) void {
     const status = run(init) catch |err| {
-        std.debug.print("An unexpected error occurred: {s}\n", .{@errorName(err)});
+        nlock.printer.eprint("nlock: unexpected error: {s}\n", .{@errorName(err)}) catch {};
         nlock.SysExits.software.exit();
     };
     std.process.exit(status);
@@ -27,8 +32,14 @@ pub fn main(init: std.process.Init) void {
 
 /// Returns the exit status for nlock: the command's for `run`, 0 for `list`.
 pub fn run(init: std.process.Init) !u8 {
-    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
     nlock.printer.init(init.io);
+    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map) catch blk: {
+        nlock.printer.eprint(
+            "nlock: ignoring invalid {s}; expected debug, info, warn, error or none\n",
+            .{nlock.logger.ENV_NLOCK_LOG_LEVEL},
+        ) catch {};
+        break :blk null;
+    });
 
     const args = init.minimal.args.toSlice(init.gpa) catch nlock.SysExits.oserr.exit();
     defer init.gpa.free(args);
@@ -55,12 +66,12 @@ pub fn run(init: std.process.Init) !u8 {
 
     const socket_path = try nlock.getSocketPath(init.gpa, init.environ_map);
     defer init.gpa.free(socket_path);
-    log(ll.Debug, "Connecting to lock server at {s}", .{socket_path});
+    log(.debug, "Connecting to lock server at {s}", .{socket_path});
 
     const address = std.Io.net.UnixAddress.init(socket_path) catch nlock.SysExits.osfile.exit();
     const stream = address.connect(init.io) catch |err| {
         nlock.printer.eprint(
-            "nlockd server is not running or cannot be reached at {s}: {s}\n",
+            "nlock: cannot reach nlockd at {s}: {s}; is it running?\n",
             .{ socket_path, @errorName(err) },
         ) catch nlock.SysExits.oserr.exit();
         nlock.SysExits.unavailable.exit();
@@ -69,15 +80,15 @@ pub fn run(init: std.process.Init) !u8 {
     verifyServer(stream) catch |err| switch (err) {
         error.UntrustedLockServer => {
             nlock.printer.eprint(
-                "Lock server socket belongs to another user. Refusing to use it.\n",
-                .{},
+                "nlock: refusing to use {s}: it is served by another user's nlockd\n",
+                .{socket_path},
             ) catch nlock.SysExits.oserr.exit();
             nlock.SysExits.unavailable.exit();
         },
         else => {
             nlock.printer.eprint(
-                "Failed to verify lock server identity: {s}\n",
-                .{@errorName(err)},
+                "nlock: cannot verify who serves {s}: {s}\n",
+                .{ socket_path, @errorName(err) },
             ) catch nlock.SysExits.oserr.exit();
             nlock.SysExits.software.exit();
         },
@@ -86,7 +97,7 @@ pub fn run(init: std.process.Init) !u8 {
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(init.io, &write_buffer);
 
-    var read_buffer: [1024]u8 = undefined;
+    var read_buffer: [nlock.max_message_len]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
 
     const ctx = Context{
@@ -100,22 +111,22 @@ pub fn run(init: std.process.Init) !u8 {
         .run => |options| return runLocked(ctx, options) catch |err| switch (err) {
             RunLockedError.LockAlreadyAcquired => {
                 nlock.printer.eprint(
-                    "Lock is already acquired by another process.\n",
-                    .{},
+                    "nlock: '{s}' is held by another process\n",
+                    .{options.name},
                 ) catch nlock.SysExits.oserr.exit();
                 nlock.SysExits.tempfail.exit();
             },
             RunLockedError.LockAcquireTimeout => {
                 nlock.printer.eprint(
-                    "Failed to acquire lock within the specified timeout.\n",
-                    .{},
+                    "nlock: timed out waiting for '{s}'\n",
+                    .{options.name},
                 ) catch nlock.SysExits.oserr.exit();
                 nlock.SysExits.tempfail.exit();
             },
             RunLockedError.LockReleaseFailed => {
                 nlock.printer.eprint(
-                    "Failed to release lock. Please check the lock server logs for more details.\n",
-                    .{},
+                    "nlock: failed to release '{s}'; see the nlockd logs\n",
+                    .{options.name},
                 ) catch nlock.SysExits.oserr.exit();
                 nlock.SysExits.software.exit();
             },
@@ -142,7 +153,7 @@ fn verifyServer(stream: std.Io.net.Stream) !void {
     const server = try nlock.peer.peerCredentials(stream);
     const uid = std.c.getuid();
     if (server.uid != uid and server.uid != 0) {
-        log(ll.Error, "Lock server is run by uid {d}, expected {d} or root", .{ server.uid, uid });
+        log(.err, "Lock server is run by uid {d}, expected {d} or root", .{ server.uid, uid });
         return error.UntrustedLockServer;
     }
 }
@@ -163,21 +174,21 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
 
     switch (acquire_status) {
         nlock.LockResponseStatus.ok => {
-            log(ll.Debug, "Lock acquired successfully. Running command", .{});
+            log(.debug, "Lock acquired successfully. Running command", .{});
             // runCommand reports its own failures as an exit status, so the
             // lock is always released below.
             const status = runCommand(ctx.io, options.command);
-            log(ll.Debug, "Command finished. Releasing lock: {s}", .{options.name});
+            log(.debug, "Command finished. Releasing lock: {s}", .{options.name});
 
             const release_status = try releaseLock(ctx.allocator, ctx.writer, ctx.reader);
 
             switch (release_status) {
                 nlock.LockResponseStatus.ok => {
-                    log(ll.Debug, "Lock released successfully", .{});
+                    log(.debug, "Lock released successfully", .{});
                     return status;
                 },
                 else => {
-                    log(ll.Error, "Failed to release lock. Status: {d}", .{release_status});
+                    log(.err, "Failed to release lock. Status: {t}", .{release_status});
                     return RunLockedError.LockReleaseFailed;
                 },
             }
@@ -191,7 +202,7 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
         // A run is pending that will start after this request was made,
         // which is what the caller asked for, so this is success.
         nlock.LockResponseStatus.coalesced, nlock.LockResponseStatus.replaced => {
-            log(ll.Debug, "Not running the command: {s}", .{@tagName(acquire_status)});
+            log(.debug, "Not running the command: {s}", .{@tagName(acquire_status)});
             return 0;
         },
         // acquireLock reads past queued to the final status.
@@ -241,14 +252,14 @@ fn readLockInfos(
     var lock_infos: std.ArrayList(nlock.LockInfo) = .empty;
     while (true) {
         const response_message = try (reader.takeDelimiter('\n')) orelse break;
-        log(ll.Debug, "Received lock info: {s}", .{response_message});
+        log(.debug, "Received lock info: {s}", .{response_message});
         try lock_infos.append(arena, try nlock.LockInfo.fromJsonLeaky(response_message, arena));
     }
     return lock_infos;
 }
 
 /// `nlock list --json`: one JSON object per lock, one per line. Unlike the
-/// table, this round-trips arbitrary names and commands exactly.
+/// table, names and commands are not escaped.
 fn formatLockInfoJson(allocator: std.mem.Allocator, lock_infos: []const nlock.LockInfo) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (lock_infos) |lock_info| {
@@ -435,10 +446,7 @@ pub fn acquireLock(
     options: nlock.cli.RunOptions,
     report: bool,
 ) !nlock.LockResponseStatus {
-    const command_str = std.mem.join(allocator, " ", options.command) catch {
-        log(ll.Error, "Failed to join command arguments", .{});
-        return error.InvalidArguments;
-    };
+    const command_str = try formatCommand(allocator, options.command);
     defer allocator.free(command_str);
     const message = try (nlock.LockRequest{ .acquire = .{
         .name = options.name,
@@ -453,7 +461,7 @@ pub fn acquireLock(
     // Every response but queued is final.
     while (true) {
         const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-        log(ll.Debug, "Received lock response: {s}", .{response_message});
+        log(.debug, "Received lock response: {s}", .{response_message});
         const parsed = try nlock.LockResponse.fromJson(response_message, allocator);
         defer parsed.deinit();
         const status = std.meta.activeTag(parsed.value);
@@ -473,6 +481,44 @@ pub fn acquireLock(
 
         if (status != .queued) return status;
     }
+}
+
+/// The command as shown in `nlock list` and in messages: the arguments joined
+/// with spaces, truncated to `max_command_len` bytes. Caller owns the result.
+fn formatCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
+    const joined = try std.mem.join(allocator, " ", argv);
+    if (joined.len <= nlock.max_command_len) return joined;
+    defer allocator.free(joined);
+
+    const ellipsis = "...";
+    var end = nlock.max_command_len - ellipsis.len;
+    // Back up to the start of a UTF-8 sequence so the cut does not turn a
+    // valid command into invalid UTF-8.
+    while (end > 0 and joined[end] & 0xC0 == 0x80) end -= 1;
+    return std.mem.concat(allocator, u8, &.{ joined[0..end], ellipsis });
+}
+
+test "formatCommand joins arguments and truncates long commands" {
+    const allocator = std.testing.allocator;
+
+    const short = try formatCommand(allocator, &.{ "echo", "hello" });
+    defer allocator.free(short);
+    try std.testing.expectEqualStrings("echo hello", short);
+
+    const exact = try formatCommand(allocator, &.{"x" ** nlock.max_command_len});
+    defer allocator.free(exact);
+    try std.testing.expectEqual(nlock.max_command_len, exact.len);
+
+    const long = try formatCommand(allocator, &.{ "echo", "x" ** (2 * nlock.max_command_len) });
+    defer allocator.free(long);
+    try std.testing.expectEqual(nlock.max_command_len, long.len);
+    try std.testing.expect(std.mem.endsWith(u8, long, "xx..."));
+
+    // "é" is two bytes; a cut through the middle of one backs up before it.
+    const accents = try formatCommand(allocator, &.{"é" ** nlock.max_command_len});
+    defer allocator.free(accents);
+    try std.testing.expect(accents.len <= nlock.max_command_len);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(accents));
 }
 
 /// The line printed when the request was coalesced into a run that is
@@ -586,7 +632,7 @@ pub fn releaseLock(
     try nlock.writeLine(writer, release_message);
 
     const release_response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    log(ll.Debug, "Received release lock response: {s}", .{release_response_message});
+    log(.debug, "Received release lock response: {s}", .{release_response_message});
 
     const release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
     defer release_response.deinit();
@@ -602,6 +648,30 @@ fn ignoreSignal(_: std.posix.SIG) callconv(.c) void {}
 /// Signals the terminal sends to the whole foreground process group. The
 /// child receives them too, so nlock outlives it and can release the lock.
 const terminal_signals = [_]std.posix.SIG{ .INT, .QUIT };
+
+/// Signals asking nlock to stop, from `kill`, `timeout`, a service manager or
+/// a closing terminal. They are passed on to the command instead, so the
+/// lock is released only once the command has exited. Were nlock to die
+/// first, the daemon would release the lock with the command still running.
+const forwarded_signals = [_]std.posix.SIG{ .TERM, .HUP };
+
+const SigNum = std.meta.Tag(std.posix.SIG);
+
+/// Pid of the running command, or 0 before it has started.
+var forward_pid: std.atomic.Value(std.posix.pid_t) = .init(0);
+/// The last forwarded signal received, or 0 if none.
+var forward_sig: std.atomic.Value(SigNum) = .init(0);
+
+/// Signal handlers may run on any thread, including while the command is
+/// being started. The handler records the signal before reading the pid, and
+/// `runCommand` records the pid before reading the signal, so at least one
+/// of them sees the other's write and the command always gets the signal
+/// (occasionally twice).
+fn forwardSignal(sig: std.posix.SIG) callconv(.c) void {
+    forward_sig.store(@intFromEnum(sig), .seq_cst);
+    const pid = forward_pid.load(.seq_cst);
+    if (pid > 0) _ = std.c.kill(pid, sig);
+}
 
 /// Exit statuses for a command that could not be started, as used by shells
 /// and by `env`, `nohup` and `flock`.
@@ -620,34 +690,53 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
     for (terminal_signals, &old_actions) |sig, *old| std.posix.sigaction(sig, &act, old);
     defer for (terminal_signals, &old_actions) |sig, *old| std.posix.sigaction(sig, old, null);
 
+    forward_pid.store(0, .seq_cst);
+    forward_sig.store(0, .seq_cst);
+    var old_forward_actions: [forwarded_signals.len]std.posix.Sigaction = undefined;
+    const forward_act: std.posix.Sigaction = .{
+        .handler = .{ .handler = forwardSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.RESTART,
+    };
+    for (forwarded_signals, &old_forward_actions) |sig, *old| std.posix.sigaction(sig, &forward_act, old);
+    defer for (forwarded_signals, &old_forward_actions) |sig, *old| std.posix.sigaction(sig, old, null);
+    defer forward_pid.store(0, .seq_cst);
+
     const spawnOptions: std.process.SpawnOptions = .{
         .argv = command,
     };
 
     var child = std.process.spawn(io, spawnOptions) catch |err| {
-        std.debug.print("nlock: {s}: {s}\n", .{ command[0], @errorName(err) });
+        nlock.printer.eprint("nlock: {s}: {s}\n", .{ command[0], @errorName(err) }) catch {};
         return switch (err) {
             error.FileNotFound => exit_not_found,
             else => exit_not_executable,
         };
     };
 
+    if (child.id) |pid| {
+        forward_pid.store(pid, .seq_cst);
+        // A signal that arrived while the command was starting.
+        const sig = forward_sig.load(.seq_cst);
+        if (sig != 0) _ = std.c.kill(pid, @enumFromInt(sig));
+    }
+
     const term = child.wait(io) catch |err| {
-        std.debug.print("nlock: failed to wait for {s}: {s}\n", .{ command[0], @errorName(err) });
+        nlock.printer.eprint("nlock: failed to wait for {s}: {s}\n", .{ command[0], @errorName(err) }) catch {};
         return 1;
     };
 
     switch (term) {
         .exited => |code| {
-            log(ll.Debug, "Process exited with code: {d}", .{code});
+            log(.debug, "Process exited with code: {d}", .{code});
             return code;
         },
         .signal, .stopped => |sig| {
-            log(ll.Debug, "Process ended by signal: {d}", .{@intFromEnum(sig)});
+            log(.debug, "Process ended by signal: {d}", .{@intFromEnum(sig)});
             return 128 +| @as(u8, @intCast(@intFromEnum(sig)));
         },
         .unknown => |status| {
-            log(ll.Debug, "Process ended with unknown status: {d}", .{status});
+            log(.debug, "Process ended with unknown status: {d}", .{status});
             return 1;
         },
     }

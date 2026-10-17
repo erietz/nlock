@@ -2,9 +2,16 @@ const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
 const log = nlock.logger.log;
-const ll = nlock.logger.LogLevel;
 
-pub const std_options: std.Options = .{ .logFn = logFn };
+/// Every lock currently held, by name.
+const LockMap = nlock.LockedStringMap(nlock.Lock);
+
+pub const std_options: std.Options = .{
+    // Release builds would otherwise compile out debug messages, leaving
+    // NLOCK_LOG_LEVEL=Debug no effect. NLOCK_LOG_LEVEL does the filtering.
+    .log_level = .debug,
+    .logFn = logFn,
+};
 
 /// Whether log messages go to syslog instead of stderr. Set once at startup.
 ///
@@ -64,6 +71,11 @@ pub fn main(init: std.process.Init) void {
                 std.debug.print("nlockd: another nlockd is already running on this socket\n", .{});
                 if (log_to_syslog) std.log.err("another nlockd is already running on this socket", .{});
             },
+            error.SocketDirNotPrivate => {
+                const message = "/tmp/nlock-{d} is not a directory of yours; remove it or set NLOCK_SOCKET";
+                std.debug.print("nlockd: " ++ message ++ "\n", .{std.c.getuid()});
+                if (log_to_syslog) std.log.err(message, .{std.c.getuid()});
+            },
             else => {
                 std.debug.print("nlockd: {s}\n", .{@errorName(err)});
                 if (log_to_syslog) std.log.err("{s}", .{@errorName(err)});
@@ -81,13 +93,27 @@ pub fn run(init: std.process.Init) !void {
 pub fn runServer(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
-    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map));
+    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map) catch blk: {
+        std.debug.print(
+            "nlockd: ignoring invalid {s}; expected debug, info, warn, error or none\n",
+            .{nlock.logger.ENV_NLOCK_LOG_LEVEL},
+        );
+        break :blk null;
+    });
 
     // Everything the daemon creates (lock file, socket) is for this user only.
     _ = std.c.umask(0o077);
 
     const socket_path = try nlock.getSocketPath(gpa, init.environ_map);
     defer gpa.free(socket_path);
+
+    // The fallback directory has a predictable name in the shared /tmp, so
+    // make sure it is ours before putting the socket and lock file in it.
+    const fallback_dir = try nlock.fallbackSocketDir(gpa);
+    defer gpa.free(fallback_dir);
+    if (std.mem.eql(u8, std.fs.path.dirname(socket_path) orelse "", fallback_dir)) {
+        try makePrivateDir(io, std.Io.Dir.cwd(), fallback_dir);
+    }
 
     // Holding an exclusive lock on `<socket>.lock` for the daemon's lifetime
     // guarantees only one nlockd serves a socket path. The kernel drops the
@@ -121,10 +147,10 @@ pub fn runServer(init: std.process.Init) !void {
     const socket_path_z = try gpa.dupeZ(u8, socket_path);
     defer gpa.free(socket_path_z);
     installShutdownHandlers(socket_path_z);
-    log(ll.Info, "nlockd version {s}", .{nlock.version()});
-    log(ll.Info, "Server started and listening on {s}", .{socket_path});
+    log(.info, "nlockd version {s}", .{nlock.version()});
+    log(.info, "Server started and listening on {s}", .{socket_path});
 
-    var map = nlock.ThreadSafeHashMap([]const u8, nlock.Lock).init(io, gpa);
+    var map = LockMap.init(io, gpa);
     // Declared before `group` so this runs after `group.cancel`: no connection
     // tasks remain, so it is safe to walk the inner map without the mutex.
     defer {
@@ -141,7 +167,16 @@ pub fn runServer(init: std.process.Init) !void {
     defer group.cancel(io);
 
     while (true) {
-        const stream = try server.accept(io);
+        const stream = server.accept(io) catch |err| switch (err) {
+            error.Canceled, error.SocketNotListening => return err,
+            // Usually temporary, e.g. out of file descriptors because of
+            // many open connections. Pause rather than spin, then retry.
+            else => {
+                log(.err, "Failed to accept connection: {s}", .{@errorName(err)});
+                try io.sleep(.fromMilliseconds(100), .awake);
+                continue;
+            },
+        };
         // Spawn a new task to handle the connection
         group.concurrent(io, connectionTask, .{
             io,
@@ -149,10 +184,54 @@ pub fn runServer(init: std.process.Init) !void {
             stream,
             &map,
         }) catch |err| {
-            log(ll.Error, "Failed to spawn connection task: {s}", .{@errorName(err)});
+            log(.err, "Failed to spawn connection task: {s}", .{@errorName(err)});
             stream.close(io);
         };
     }
+}
+
+/// Creates the directory `sub_path` in `parent` if it does not exist, and
+/// makes sure only this user can use it. It must be a real directory, not a
+/// symlink, and it must be ours: only its owner may change its permissions,
+/// so failing to set them to 0700 means another user created it.
+fn makePrivateDir(io: Io, parent: std.Io.Dir, sub_path: []const u8) !void {
+    const private: std.Io.File.Permissions = .fromMode(0o700);
+    parent.createDir(io, sub_path, private) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    // `iterate` only to get a real descriptor: without it, Linux opens the
+    // directory with O_PATH, which cannot have its permissions changed.
+    var dir = parent.openDir(io, sub_path, .{ .follow_symlinks = false, .iterate = true }) catch |err| switch (err) {
+        error.SymLinkLoop, error.NotDir => return error.SocketDirNotPrivate,
+        else => return err,
+    };
+    defer dir.close(io);
+    dir.setPermissions(io, private) catch |err| switch (err) {
+        error.AccessDenied, error.PermissionDenied => return error.SocketDirNotPrivate,
+        else => return err,
+    };
+}
+
+test "makePrivateDir creates a private directory and rejects symlinks" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try makePrivateDir(io, tmp.dir, "new");
+    try std.testing.expectEqual(0o700, (try tmp.dir.statFile(io, "new", .{})).permissions.toMode() & 0o777);
+
+    // An existing directory of ours is made private.
+    try tmp.dir.createDir(io, "open", .fromMode(0o755));
+    try makePrivateDir(io, tmp.dir, "open");
+    try std.testing.expectEqual(0o700, (try tmp.dir.statFile(io, "open", .{})).permissions.toMode() & 0o777);
+
+    // A symlink could point anywhere, even to a directory of ours.
+    try tmp.dir.symLink(io, "new", "link", .{ .is_directory = true });
+    try std.testing.expectError(error.SocketDirNotPrivate, makePrivateDir(io, tmp.dir, "link"));
+
+    try tmp.dir.writeFile(io, .{ .sub_path = "file", .data = "" });
+    try std.testing.expectError(error.SocketDirNotPrivate, makePrivateDir(io, tmp.dir, "file"));
 }
 
 /// Socket path removed by `handleShutdownSignal`. Set once before the
@@ -186,7 +265,7 @@ fn connectionTask(
     io: Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    map: *LockMap,
 ) Io.Cancelable!void {
     handleConnection(
         io,
@@ -194,7 +273,7 @@ fn connectionTask(
         stream,
         map,
     ) catch |err| {
-        log(ll.Debug, "Connection error: {s}", .{@errorName(err)});
+        log(.debug, "Connection error: {s}", .{@errorName(err)});
     };
 }
 
@@ -202,39 +281,37 @@ fn handleConnection(
     io: Io,
     allocator: std.mem.Allocator,
     stream: std.Io.net.Stream,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    map: *LockMap,
 ) !void {
     defer stream.close(io);
-    var read_buffer: [1024]u8 = undefined;
-    var reader = stream.reader(io, &read_buffer);
+    // On the heap: connection tasks may run on small stacks.
+    const read_buffer = try allocator.alloc(u8, nlock.max_message_len);
+    defer allocator.free(read_buffer);
+    var reader = stream.reader(io, read_buffer);
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
 
     // Ask the kernel who is on the other end of the socket rather than
     // trusting a pid sent by the client.
     const peer = nlock.peer.peerCredentials(stream) catch |err| {
-        log(ll.Error, "Failed to get peer credentials: {s}", .{@errorName(err)});
+        log(.err, "Failed to get peer credentials: {s}", .{@errorName(err)});
         return err;
     };
 
-    // Client current follows this simple ACQUIRE -> EXECUTE -> RELEASE
-    // pattern, but this will change when implementing the `list` command, for
-    // example.
-
-    // Read the acquire request message from the client
-    // const req = try readRequest(&reader.interface);
+    // A connection makes one request: `list`, or `acquire` followed, once
+    // the client's command has finished, by `release`.
     const req_parsed = try readRequest(&reader.interface, allocator);
     defer req_parsed.deinit();
     const req = switch (req_parsed.value) {
         .acquire => |acquire| acquire,
         .list => {
             return handleListLocksRequest(allocator, map, &writer.interface) catch |err| {
-                log(ll.Error, "Failed to handle list locks request: {s}", .{@errorName(err)});
+                log(.err, "Failed to handle list locks request: {s}", .{@errorName(err)});
                 return err;
             };
         },
         .release => {
-            log(ll.Error, "Received release request before acquiring a lock", .{});
+            log(.err, "Received release request before acquiring a lock", .{});
             return error.UnexpectedRequestType;
         },
     };
@@ -246,42 +323,43 @@ fn handleConnection(
         map,
         &writer.interface,
     ) catch |err| {
-        log(ll.Error, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
+        log(.err, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
         return err;
     };
-    // Busy, coalesced or replaced: nothing to release.
+    // Busy, coalesced, replaced or timed out: nothing to release.
     if (!holding) return;
 
     // If the client goes away without releasing (e.g. it was killed by a
     // signal), release the lock on its behalf so it is not held forever.
     var released = false;
     defer if (!released) {
-        log(ll.Info, "Client disconnected while holding lock '{s}'. Releasing it.", .{req.name});
+        log(.info, "Client disconnected while holding lock '{s}'. Releasing it.", .{req.name});
         _ = releaseLock(io, allocator, map, req.name);
     };
 
     // The client executes the command and then sends a release lock request
-    log(ll.Debug, "Waiting for release lock request from client", .{});
+    log(.debug, "Waiting for release lock request from client", .{});
     const release_req_parsed = try readRequest(&reader.interface, allocator);
     defer release_req_parsed.deinit();
     switch (release_req_parsed.value) {
         // A connection may only release the lock it acquired, so the request
         // does not name one.
         .release => {
-            handleReleaseLockRequest(
-                io,
-                allocator,
-                req.name,
-                map,
-                &writer.interface,
-            ) catch |err| {
-                log(ll.Debug, "Failed to handle release lock request: {s}", .{@errorName(err)});
-                return err;
-            };
+            // Marked before releasing: once the lock is passed on, nothing
+            // after this point (e.g. failing to send the reply) may release
+            // it again on disconnect, or it would release the next holder's.
             released = true;
+            log(.info, "Releasing lock for name '{s}'", .{req.name});
+            if (!releaseLock(io, allocator, map, req.name)) {
+                log(.err, "No lock found for name '{s}' to release.", .{req.name});
+                return error.LockNotFound;
+            }
+            const lock_response = try (nlock.LockResponse{ .ok = {} }).toJson(allocator);
+            defer allocator.free(lock_response);
+            try nlock.writeLine(&writer.interface, lock_response);
         },
         else => |release_req| {
-            log(ll.Debug, "Received unexpected request type: {s}", .{@tagName(release_req)});
+            log(.debug, "Received unexpected request type: {s}", .{@tagName(release_req)});
             return error.UnexpectedRequestType;
         },
     }
@@ -289,7 +367,7 @@ fn handleConnection(
 
 fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !std.json.Parsed(nlock.LockRequest) {
     const message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
-    log(ll.Debug, "Received lock request: {s}", .{message});
+    log(.debug, "Received lock request: {s}", .{message});
     return nlock.LockRequest.fromJson(message, allocator);
 }
 
@@ -313,15 +391,19 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     try std.testing.expectEqualStrings(expected_request.command, request.command);
 }
 
+/// Longest `--timeout` honored, in seconds. Longer ones wait indefinitely.
+const max_timeout_s: u64 = 10 * 365 * std.time.s_per_day;
+
 /// Returns true if the connection now holds the lock, or false if it does
 /// not: the lock was busy and the request was nonblocking, the request was
-/// coalesced into a pending run, or it was replaced while queued.
+/// coalesced into a pending run, it was replaced while queued, or its timeout
+/// expired.
 fn handleAcquireLockRequest(
     io: Io,
     allocator: std.mem.Allocator,
     lock_request: nlock.LockRequest.Acquire,
     peer: nlock.peer.Credentials,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    map: *LockMap,
     writer: *Io.Writer,
 ) !bool {
     // Acquire the map mutex so checking whether the lock is held, creating
@@ -329,7 +411,7 @@ fn handleAcquireLockRequest(
     // other acquires and releases.
     map.lock();
     if (map.map.getPtr(lock_request.name)) |existing_lock| {
-        log(ll.Info, "Lock for name '{s}' is already acquired", .{lock_request.name});
+        log(.info, "Lock for name '{s}' is already acquired", .{lock_request.name});
 
         // A queued client has not started its run yet, so that run happens
         // after whatever triggered this request: no need to queue another.
@@ -346,7 +428,7 @@ fn handleAcquireLockRequest(
             };
             map.unlock();
             defer allocator.free(coalesced_response);
-            log(ll.Info, "Lock '{s}' already has a pending run. Not queueing.", .{lock_request.name});
+            log(.info, "Lock '{s}' already has a pending run. Not queueing.", .{lock_request.name});
             try nlock.writeLine(writer, coalesced_response);
             return false;
         };
@@ -399,7 +481,7 @@ fn handleAcquireLockRequest(
                 replaced.replaced_by = peer.pid;
                 replaced.event.set(io);
             }
-            log(ll.Info, "Replaced {d} waiter(s) for lock '{s}'", .{ replaced_count, lock_request.name });
+            log(.info, "Replaced {d} waiter(s) for lock '{s}'", .{ replaced_count, lock_request.name });
         }
         // Queue up the command to be executed when the acquired lock is
         // released
@@ -411,13 +493,14 @@ fn handleAcquireLockRequest(
             return err;
         };
 
-        if (lock_request.timeout) |timeout_s| {
-            log(ll.Debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_request.name, timeout_s });
-            // TODO: This is not a safe type cast. We should use a safe cast or
-            // check the value before casting.
+        // The timeout comes from the client, so anything too large to be a
+        // real limit is treated as no limit rather than trusted.
+        const timeout_s: ?u64 = if (lock_request.timeout) |t| (if (t <= max_timeout_s) t else null) else null;
+        if (timeout_s) |t| {
+            log(.debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_request.name, t });
             const timeout = std.Io.Timeout{ .duration = .{
                 .clock = .awake,
-                .raw = std.Io.Duration.fromSeconds(@intCast(timeout_s)),
+                .raw = std.Io.Duration.fromSeconds(@intCast(t)),
             } };
 
             // Wait for the lock to be released. This does not happen until the
@@ -426,7 +509,7 @@ fn handleAcquireLockRequest(
             // error to the client.
             waiter.event.waitTimeout(io, timeout) catch |err| switch (err) {
                 error.Timeout => {
-                    log(ll.Info, "Timeout while waiting for lock '{s}' to be released", .{lock_request.name});
+                    log(.info, "Timeout while waiting for lock '{s}' to be released", .{lock_request.name});
                     map.lock();
                     // Not set: still queued. Set: the lock arrived, or this
                     // waiter was replaced, just as the timeout expired;
@@ -440,7 +523,7 @@ fn handleAcquireLockRequest(
                         const timeout_response = try (nlock.LockResponse{ .timeout = {} }).toJson(allocator);
                         defer allocator.free(timeout_response);
                         try nlock.writeLine(writer, timeout_response);
-                        return error.Timeout;
+                        return false;
                     }
                     map.unlock();
                 },
@@ -452,7 +535,7 @@ fn handleAcquireLockRequest(
         } else {
             // Wait for the lock to be released. This does not happen until the
             // client sends a release lock request, which will signal this waiter.
-            log(ll.Debug, "Waiting for lock '{s}' to be released without timeout", .{lock_request.name});
+            log(.debug, "Waiting for lock '{s}' to be released without timeout", .{lock_request.name});
             waiter.event.wait(io) catch |err| {
                 abandonWait(io, allocator, map, lock_request.name, &waiter);
                 return err;
@@ -463,7 +546,7 @@ fn handleAcquireLockRequest(
             // Taken out of the queue, so the command was never handed to
             // the lock and is still ours.
             allocator.free(command_copy);
-            log(ll.Info, "Waiter for lock '{s}' was replaced by pid {d}", .{ lock_request.name, by_pid });
+            log(.info, "Waiter for lock '{s}' was replaced by pid {d}", .{ lock_request.name, by_pid });
             const replaced_response = try (nlock.LockResponse{ .replaced = .{
                 .pid = by_pid,
             } }).toJson(allocator);
@@ -502,7 +585,7 @@ fn handleAcquireLockRequest(
         };
         map.unlock();
 
-        log(ll.Info, "Acquired lock for name '{s}' (uid: {d}, pid: {d}). Command: {s}", .{
+        log(.info, "Acquired lock for name '{s}' (uid: {d}, pid: {d}). Command: {s}", .{
             lock_request.name,
             peer.uid,
             peer.pid,
@@ -514,7 +597,7 @@ fn handleAcquireLockRequest(
     // while queued), pass the lock on to the next waiter.
     errdefer _ = releaseLock(io, allocator, map, lock_request.name);
 
-    log(ll.Info, "Sending acquired response for lock {s}.", .{lock_request.name});
+    log(.info, "Sending acquired response for lock {s}.", .{lock_request.name});
     const acquired_response = try (nlock.LockResponse{ .ok = {} }).toJson(allocator);
     defer allocator.free(acquired_response);
     try nlock.writeLine(writer, acquired_response);
@@ -528,7 +611,7 @@ fn handleAcquireLockRequest(
 fn abandonWait(
     io: Io,
     allocator: std.mem.Allocator,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    map: *LockMap,
     name: []const u8,
     waiter: *nlock.Waiter,
 ) void {
@@ -548,33 +631,12 @@ fn abandonWait(
     }
 }
 
-fn handleReleaseLockRequest(
-    io: Io,
-    allocator: std.mem.Allocator,
-    name: []const u8,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
-    writer: *Io.Writer,
-) !void {
-    log(ll.Info, "Releasing lock for name '{s}'", .{name});
-
-    if (releaseLock(io, allocator, map, name)) {
-        log(ll.Info, "Lock for name '{s}' released successfully.", .{name});
-        const lock_response = try (nlock.LockResponse{ .ok = {} }).toJson(allocator);
-        defer allocator.free(lock_response);
-        try nlock.writeLine(writer, lock_response);
-        return;
-    }
-
-    log(ll.Error, "No lock found for name '{s}' to release.", .{name});
-    return error.LockNotFound;
-}
-
 /// Hands the lock to the next waiter, or removes it if there is none.
 /// Returns false if no lock with that name exists.
 fn releaseLock(
     io: Io,
     allocator: std.mem.Allocator,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    map: *LockMap,
     name: []const u8,
 ) bool {
     map.lock();
@@ -606,7 +668,7 @@ fn nowSeconds(io: Io) i64 {
 
 fn handleListLocksRequest(
     allocator: std.mem.Allocator,
-    map: *nlock.ThreadSafeHashMap([]const u8, nlock.Lock),
+    map: *LockMap,
     writer: *Io.Writer,
 ) !void {
     // Serialize every lock while holding the mutex so the snapshot is

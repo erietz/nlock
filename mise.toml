@@ -78,7 +78,7 @@ depends = ["test:unit", "test:integration"]
 [tasks."test:tmux"]
 depends = "test"
 env.COMMAND = "sh -c 'echo testing && sleep 3'"
-env.NLOCK_LOG_LEVEL = "Debug"
+env.NLOCK_LOG_LEVEL = "debug"
 run = "./tmux_tests.sh"
 
 [tasks."install"]

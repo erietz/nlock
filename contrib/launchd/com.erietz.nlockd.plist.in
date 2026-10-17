@@ -28,7 +28,7 @@
     <key>EnvironmentVariables</key>
     <dict>
         <key>NLOCK_LOG_LEVEL</key>
-        <string>Debug</string>
+        <string>info</string>
     </dict>
 </dict>
 </plist>
