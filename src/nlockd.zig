@@ -200,7 +200,9 @@ fn makePrivateDir(io: Io, parent: std.Io.Dir, sub_path: []const u8) !void {
         error.PathAlreadyExists => {},
         else => return err,
     };
-    var dir = parent.openDir(io, sub_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+    // `iterate` only to get a real descriptor: without it, Linux opens the
+    // directory with O_PATH, which cannot have its permissions changed.
+    var dir = parent.openDir(io, sub_path, .{ .follow_symlinks = false, .iterate = true }) catch |err| switch (err) {
         error.SymLinkLoop, error.NotDir => return error.SocketDirNotPrivate,
         else => return err,
     };

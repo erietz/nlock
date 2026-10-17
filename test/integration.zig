@@ -660,22 +660,29 @@ test "long commands run, and are shown truncated" {
     const daemon = try harness.Daemon.start(gpa, io);
     defer daemon.stop(gpa, io);
 
-    // Far longer than a message may be, so the command must be truncated
-    // before it is sent.
-    const long_arg = "x" ** (4 * nlock.max_message_len);
+    // Together far longer than a message may be, so the command must be
+    // truncated before it is sent. Several arguments, because Linux limits
+    // a single one to 128 KiB.
+    const long_arg = "x" ** nlock.max_message_len;
+    const long_args = [_][]const u8{long_arg} ** 4;
 
-    const result = try daemon.client(gpa, io, &.{ "run", "mylock", "--", "echo", long_arg });
+    const echo = try std.mem.concat(gpa, []const u8, &.{ &.{ "run", "mylock", "--", "echo" }, &long_args });
+    defer gpa.free(echo);
+    const result = try daemon.client(gpa, io, echo);
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
-    try std.testing.expectEqual(long_arg.len + 1, result.stdout.len);
+    // The arguments, separated by spaces, and a newline.
+    try std.testing.expectEqual(long_args.len * (long_arg.len + 1), result.stdout.len);
 
     const go_path = try daemon.tmpPath(gpa, "go");
     defer gpa.free(go_path);
     defer daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" }) catch {};
     const script = try std.fmt.allocPrint(gpa, "while [ ! -f {s} ]; do sleep 0.01; done", .{go_path});
     defer gpa.free(script);
-    var holder = try daemon.spawnClient(gpa, io, &.{ "run", "mylock", "--", "sh", "-c", script, long_arg });
+    const hold = try std.mem.concat(gpa, []const u8, &.{ &.{ "run", "mylock", "--", "sh", "-c", script }, &long_args });
+    defer gpa.free(hold);
+    var holder = try daemon.spawnClient(gpa, io, hold);
     var holder_done = false;
     defer if (!holder_done) holder.kill(io);
     try waitForWaiters(gpa, io, daemon, "mylock", 0);
