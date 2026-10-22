@@ -1,5 +1,5 @@
 const std = @import("std");
-const max_name_len = @import("protocol.zig").max_name_len;
+const protocol = @import("nlock").protocol;
 
 const SYNOPSIS =
     \\Usage: nlock run [options] <name> -- <command> [args...]
@@ -108,17 +108,6 @@ pub const ListOptions = struct {
     }
 };
 
-/// Returns true if `name` can be used as a lock name. Whitespace and control
-/// characters are rejected so names stay a single field in `nlock list`
-/// output.
-pub fn isValidLockName(name: []const u8) bool {
-    if (name.len == 0 or name.len > max_name_len) return false;
-    for (name) |ch| {
-        if (std.ascii.isWhitespace(ch) or std.ascii.isControl(ch)) return false;
-    }
-    return true;
-}
-
 pub const RunOptions = struct {
     name: []const u8,
     command: []const [:0]const u8,
@@ -181,7 +170,7 @@ pub const RunOptions = struct {
             }
         }
 
-        if (!isValidLockName(options.name)) {
+        if (!protocol.isValidLockName(options.name)) {
             return error.InvalidArguments; // No name, or name has whitespace or control characters
         }
 
@@ -450,15 +439,4 @@ test "RunOptions.parseArgs rejects names with whitespace" {
 test "RunOptions.parseArgs rejects names with control characters" {
     const args: []const [:0]const u8 = &.{ "my\x1block", "--", "echo", "Hello" };
     try std.testing.expectError(error.InvalidArguments, RunOptions.parseArgs(args));
-}
-
-test "isValidLockName" {
-    try std.testing.expect(isValidLockName("build"));
-    try std.testing.expect(isValidLockName("db-migrate.v2/prod"));
-    try std.testing.expect(!isValidLockName(""));
-    try std.testing.expect(!isValidLockName("a b"));
-    try std.testing.expect(!isValidLockName("a\tb"));
-    try std.testing.expect(!isValidLockName("a\nb"));
-    try std.testing.expect(isValidLockName("x" ** max_name_len));
-    try std.testing.expect(!isValidLockName("x" ** (max_name_len + 1)));
 }

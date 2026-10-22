@@ -28,7 +28,7 @@ pub const Daemon = struct {
 
         self.environ = .init(gpa);
         errdefer self.environ.deinit();
-        try self.environ.put(nlock.ENV_SOCKET_PATH, self.socket_path);
+        try self.environ.put(nlock.paths.ENV_SOCKET_PATH, self.socket_path);
 
         self.child = try spawnDaemon(io, &self.environ);
         errdefer self.child.kill(io);
