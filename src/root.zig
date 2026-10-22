@@ -5,7 +5,7 @@ const build_zig_zon = @import("build_zig_zon");
 const protocol = @import("protocol.zig");
 const hash = @import("hash.zig");
 const queue = @import("queue.zig");
-pub const logger = @import("logger.zig");
+pub const Logger = @import("logger.zig");
 pub const printer = @import("printer.zig");
 pub const cli = @import("cli.zig");
 pub const peer = @import("peer.zig");
@@ -28,10 +28,11 @@ extern "c" fn confstr(name: c_int, buf: ?[*]u8, len: usize) usize;
 /// 2. Linux: `$XDG_RUNTIME_DIR/nlock.sock`
 /// 3. macOS: `nlock.sock` in the per-user temporary directory
 ///    (`getconf DARWIN_USER_TEMP_DIR`)
-/// 4. `/tmp/nlock-<uid>.sock`
+/// 4. `nlock.sock` in `fallbackSocketDir()`, `/tmp/nlock-<uid>`
 ///
 /// The per-user directories are private to the user, so nobody else can
-/// create a socket there first and impersonate the daemon.
+/// create a socket there first and impersonate the daemon. `nlockd` creates
+/// the fallback directory and checks that it is private before using it.
 /// Caller owns the result.
 pub fn getSocketPath(allocator: std.mem.Allocator, environ_map: *const std.process.Environ.Map) ![]u8 {
     if (environ_map.get(ENV_SOCKET_PATH)) |path| {
@@ -51,7 +52,15 @@ pub fn getSocketPath(allocator: std.mem.Allocator, environ_map: *const std.proce
             return std.fs.path.join(allocator, &.{ buf[0 .. len - 1], SOCKET_NAME });
         }
     }
-    return std.fmt.allocPrint(allocator, "/tmp/nlock-{d}.sock", .{std.c.getuid()});
+    const dir = try fallbackSocketDir(allocator);
+    defer allocator.free(dir);
+    return std.fs.path.join(allocator, &.{ dir, SOCKET_NAME });
+}
+
+/// The directory holding the socket when no per-user directory is available,
+/// `/tmp/nlock-<uid>`. Caller owns the result.
+pub fn fallbackSocketDir(allocator: std.mem.Allocator) ![]u8 {
+    return std.fmt.allocPrint(allocator, "/tmp/nlock-{d}", .{std.c.getuid()});
 }
 
 test "getSocketPath prefers NLOCK_SOCKET" {
@@ -79,7 +88,7 @@ test "getSocketPath defaults to a per-user path" {
     } else if (builtin.os.tag.isDarwin()) {
         try std.testing.expect(std.mem.endsWith(u8, path, "/T/nlock.sock"));
     } else {
-        const expected = try std.fmt.allocPrint(allocator, "/tmp/nlock-{d}.sock", .{std.c.getuid()});
+        const expected = try std.fmt.allocPrint(allocator, "/tmp/nlock-{d}/nlock.sock", .{std.c.getuid()});
         defer allocator.free(expected);
         try std.testing.expectEqualStrings(expected, path);
     }
@@ -89,7 +98,10 @@ pub const LockRequest = protocol.LockRequest;
 pub const LockResponse = protocol.LockResponse;
 pub const LockInfo = protocol.LockInfo;
 pub const writeLine = protocol.writeLine;
-pub const ThreadSafeHashMap = hash.ThreadSafeHashMap;
+pub const max_name_len = protocol.max_name_len;
+pub const max_command_len = protocol.max_command_len;
+pub const max_message_len = protocol.max_message_len;
+pub const LockedStringMap = hash.LockedStringMap;
 pub const Lock = queue.Lock;
 pub const Waiter = queue.Waiter;
 

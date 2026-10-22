@@ -1,52 +1,66 @@
 const std = @import("std");
+const Level = std.log.Level;
 
 pub const ENV_NLOCK_LOG_LEVEL = "NLOCK_LOG_LEVEL";
 
-pub const LogLevel = enum {
-    None,
-    Debug,
-    Info,
-    Warn,
-    Error,
-};
+/// Least severe level that is logged, or null to log nothing (the default).
+var threshold: ?Level = null;
 
-var log_level: LogLevel = LogLevel.None;
-
-pub fn init(level: LogLevel) void {
-    log_level = level;
+pub fn init(level: ?Level) void {
+    threshold = level;
 }
 
-pub fn getLogLevel(environ_map: *const std.process.Environ.Map) LogLevel {
-    const log_level_str = environ_map.get(ENV_NLOCK_LOG_LEVEL);
-    const level = std.meta.stringToEnum(LogLevel, log_level_str orelse "None") orelse LogLevel.None;
-    return level;
+/// Reads NLOCK_LOG_LEVEL: `debug`, `info`, `warn`, `error` or `none`, in any
+/// case. Unset means `none`.
+pub fn getLogLevel(environ_map: *const std.process.Environ.Map) error{InvalidLogLevel}!?Level {
+    return parseLevel(environ_map.get(ENV_NLOCK_LOG_LEVEL) orelse return null);
 }
 
-/// Returns true if a message at `level` should be logged when the configured
-/// level is `threshold`. `None` disables logging entirely, even though it
-/// sorts below every other level.
-fn enabled(level: LogLevel, threshold: LogLevel) bool {
-    if (threshold == .None) return false;
-    return @intFromEnum(level) >= @intFromEnum(threshold);
+fn parseLevel(value: []const u8) error{InvalidLogLevel}!?Level {
+    if (std.ascii.eqlIgnoreCase(value, "none")) return null;
+    // std.log calls the most severe level `err`; accept the usual `error`.
+    if (std.ascii.eqlIgnoreCase(value, "error")) return .err;
+    inline for (.{ Level.warn, Level.info, Level.debug }) |level| {
+        if (std.ascii.eqlIgnoreCase(value, @tagName(level))) return level;
+    }
+    return error.InvalidLogLevel;
 }
 
-pub fn log(level: LogLevel, comptime message: []const u8, args: anytype) void {
-    if (enabled(level, log_level)) {
-        switch (level) {
-            .None => {},
-            .Debug => std.log.debug(message, args),
-            .Info => std.log.info(message, args),
-            .Warn => std.log.warn(message, args),
-            .Error => std.log.err(message, args),
-        }
+/// Returns true if a message at `level` is logged when the least severe
+/// level logged is `least_severe`.
+fn enabled(level: Level, least_severe: ?Level) bool {
+    const t = least_severe orelse return false;
+    // NOTE: zig's enum values are 0->err, 1->warn, 2->info, 3->debug, so the
+    // comparison is reversed.
+    return @intFromEnum(level) <= @intFromEnum(t);
+}
+
+pub fn log(comptime level: Level, comptime format: []const u8, args: anytype) void {
+    if (!enabled(level, threshold)) return;
+    switch (level) {
+        .err => std.log.err(format, args),
+        .warn => std.log.warn(format, args),
+        .info => std.log.info(format, args),
+        .debug => std.log.debug(format, args),
     }
 }
 
+test "parseLevel" {
+    try std.testing.expectEqual(@as(?Level, .debug), try parseLevel("debug"));
+    try std.testing.expectEqual(@as(?Level, .debug), try parseLevel("Debug"));
+    try std.testing.expectEqual(@as(?Level, .info), try parseLevel("INFO"));
+    try std.testing.expectEqual(@as(?Level, .warn), try parseLevel("warn"));
+    try std.testing.expectEqual(@as(?Level, .err), try parseLevel("Error"));
+    try std.testing.expectEqual(@as(?Level, null), try parseLevel("None"));
+    try std.testing.expectError(error.InvalidLogLevel, parseLevel("verbose"));
+    try std.testing.expectError(error.InvalidLogLevel, parseLevel(""));
+}
+
 test "enabled" {
-    try std.testing.expect(!enabled(.Error, .None));
-    try std.testing.expect(!enabled(.Debug, .None));
-    try std.testing.expect(enabled(.Debug, .Debug));
-    try std.testing.expect(enabled(.Error, .Debug));
-    try std.testing.expect(!enabled(.Info, .Warn));
-    try std.testing.expect(enabled(.Warn, .Warn));
+    try std.testing.expect(!enabled(.err, null));
+    try std.testing.expect(!enabled(.debug, null));
+    try std.testing.expect(enabled(.debug, .debug));
+    try std.testing.expect(enabled(.err, .debug));
+    try std.testing.expect(!enabled(.info, .warn));
+    try std.testing.expect(enabled(.warn, .warn));
 }

@@ -1,6 +1,21 @@
 const std = @import("std");
 const Io = std.Io;
 
+/// Longest lock name, in bytes.
+pub const max_name_len = 255;
+
+/// Longest command string the client sends, in bytes. The command is only
+/// shown to people, so the client truncates longer ones.
+pub const max_command_len = 4096;
+
+/// Size of the buffer each side reads one message into. Every message fits,
+/// even when each byte of the name and command is escaped as `\u00XX`.
+pub const max_message_len = 64 * 1024;
+
+comptime {
+    std.debug.assert(6 * (max_name_len + max_command_len) + 1024 <= max_message_len);
+}
+
 /// Options for parsing every protocol message.
 const parse_options: std.json.ParseOptions = .{
     // Copy strings rather than pointing into the input, which is usually a
