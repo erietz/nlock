@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
-const log = nlock.logger.log;
+const log = nlock.Logger.log;
 
 /// Every lock currently held, by name.
 const LockMap = nlock.LockedStringMap(nlock.Lock);
@@ -93,10 +93,10 @@ pub fn run(init: std.process.Init) !void {
 pub fn runServer(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.gpa;
-    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map) catch blk: {
+    nlock.Logger.init(nlock.Logger.getLogLevel(init.environ_map) catch blk: {
         std.debug.print(
             "nlockd: ignoring invalid {s}; expected debug, info, warn, error or none\n",
-            .{nlock.logger.ENV_NLOCK_LOG_LEVEL},
+            .{nlock.Logger.ENV_NLOCK_LOG_LEVEL},
         );
         break :blk null;
     });

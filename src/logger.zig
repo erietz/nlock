@@ -30,6 +30,8 @@ fn parseLevel(value: []const u8) error{InvalidLogLevel}!?Level {
 /// level logged is `least_severe`.
 fn enabled(level: Level, least_severe: ?Level) bool {
     const t = least_severe orelse return false;
+    // NOTE: zig's enum values are 0->err, 1->warn, 2->info, 3->debug, so the
+    // comparison is reversed.
     return @intFromEnum(level) <= @intFromEnum(t);
 }
 

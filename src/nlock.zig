@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
-const log = nlock.logger.log;
+const log = nlock.Logger.log;
 
 pub const std_options: std.Options = .{
     // Release builds would otherwise compile out debug messages, leaving
@@ -33,10 +33,10 @@ pub fn main(init: std.process.Init) void {
 /// Returns the exit status for nlock: the command's for `run`, 0 for `list`.
 pub fn run(init: std.process.Init) !u8 {
     nlock.printer.init(init.io);
-    nlock.logger.init(nlock.logger.getLogLevel(init.environ_map) catch blk: {
+    nlock.Logger.init(nlock.Logger.getLogLevel(init.environ_map) catch blk: {
         nlock.printer.eprint(
             "nlock: ignoring invalid {s}; expected debug, info, warn, error or none\n",
-            .{nlock.logger.ENV_NLOCK_LOG_LEVEL},
+            .{nlock.Logger.ENV_NLOCK_LOG_LEVEL},
         ) catch {};
         break :blk null;
     });
