@@ -10,9 +10,10 @@ const appendEscaped = format.appendEscaped;
 const formatElapsed = format.formatElapsed;
 
 /// Requests the lock and waits for the daemon's answer: ok, busy, timeout,
-/// coalesced or replaced. When `report` is set, explains on stderr who holds
-/// the lock before waiting for it, and why the command will not run if the
-/// request was coalesced or replaced.
+/// coalesced, replaced or mismatch. When `report` is set, explains on stderr
+/// who holds the lock before waiting for it, and why the command will not
+/// run if the request was coalesced or replaced. A mismatch is an error, so
+/// it is always explained.
 pub fn acquireLock(
     io: Io,
     allocator: std.mem.Allocator,
@@ -29,6 +30,7 @@ pub fn acquireLock(
         .timeout = options.timeout,
         .command = command_str,
         .if_pending = if (options.coalesce) .skip else if (options.replace) .replace else .queue,
+        .slots = options.slots,
     } }).toJson(allocator);
     defer allocator.free(message);
     try protocol.writeLine(writer, message);
@@ -41,7 +43,12 @@ pub fn acquireLock(
         defer parsed.deinit();
         const status = std.meta.activeTag(parsed.value);
 
-        if (report) {
+        if (parsed.value == .mismatch) {
+            var arena_state = std.heap.ArenaAllocator.init(allocator);
+            defer arena_state.deinit();
+            const m = try formatMismatchMessage(arena_state.allocator(), options.name, options.slots, parsed.value.mismatch);
+            printer.eprint("{s}", .{m}) catch {};
+        } else if (report) {
             var arena_state = std.heap.ArenaAllocator.init(allocator);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
@@ -49,7 +56,7 @@ pub fn acquireLock(
                 .queued => |queued| try formatQueuedMessage(arena, queued.holder, queued.ahead, format.nowSeconds(io)),
                 .coalesced => |coalesced| try formatCoalescedMessage(arena, options.name, coalesced),
                 .replaced => |replaced| try formatReplacedMessage(arena, options.name, replaced),
-                .ok, .busy, .timeout => null,
+                .ok, .busy, .timeout, .mismatch => null,
             };
             if (explanation) |m| printer.eprint("{s}", .{m}) catch {};
         }
@@ -133,6 +140,22 @@ fn formatReplacedMessage(
     return out.items;
 }
 
+/// The line printed when the lock is in use with a different number of
+/// slots than requested, e.g.
+/// `nlock: 'build' is in use with --slots 4, not 2`
+fn formatMismatchMessage(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    requested: u32,
+    mismatch: protocol.LockResponse.Mismatch,
+) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(allocator, "nlock: '");
+    try appendEscaped(allocator, &out, name);
+    try out.print(allocator, "' is in use with --slots {d}, not {d}\n", .{ mismatch.slots, requested });
+    return out.items;
+}
+
 test "formatCoalescedMessage and formatReplacedMessage" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -149,10 +172,17 @@ test "formatCoalescedMessage and formatReplacedMessage" {
         "nlock: replaced in the queue for 'deploy' by a newer request\n",
         try formatReplacedMessage(arena, "deploy", .{ .pid = 0 }),
     );
+    try std.testing.expectEqualStrings(
+        "nlock: 'build' is in use with --slots 4, not 1\n",
+        try formatMismatchMessage(arena, "build", 1, .{ .slots = 4 }),
+    );
 }
 
 /// The line printed while waiting for a lock held by someone else, e.g.
 /// `nlock: waiting for 'db' — held by pid 4242 for 02:13: ./migrate --up (2 ahead of you)`
+/// For a lock with several slots, the holder described is the
+/// longest-standing one:
+/// `nlock: waiting for 'build' — all 4 slots held, longest by pid 4242 for 02:13: make (next in line)`
 fn formatQueuedMessage(
     allocator: std.mem.Allocator,
     holder: protocol.LockInfo,
@@ -162,7 +192,11 @@ fn formatQueuedMessage(
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(allocator, "nlock: waiting for '");
     try appendEscaped(allocator, &out, holder.name);
-    try out.appendSlice(allocator, "' — held");
+    if (holder.slots > 1) {
+        try out.print(allocator, "' — all {d} slots held, longest", .{holder.slots});
+    } else {
+        try out.appendSlice(allocator, "' — held");
+    }
     if (holder.pid > 0) try out.print(allocator, " by pid {d}", .{holder.pid});
     try out.print(allocator, " for {s}: ", .{try formatElapsed(allocator, now - holder.acquired_at)});
     try appendEscaped(allocator, &out, holder.command);
@@ -191,6 +225,13 @@ test "formatQueuedMessage" {
     try std.testing.expectEqualStrings(
         "nlock: waiting for 'db' — held for 00:00: sh -c 'a\\nb' (next in line)\n",
         try formatQueuedMessage(arena, unknown_pid, 0, 1000),
+    );
+
+    var slots = holder;
+    slots.slots = 4;
+    try std.testing.expectEqualStrings(
+        "nlock: waiting for 'db' — all 4 slots held, longest by pid 4242 for 02:13: ./migrate --up (next in line)\n",
+        try formatQueuedMessage(arena, slots, 0, 1133),
     );
 }
 

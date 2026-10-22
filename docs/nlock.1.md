@@ -12,7 +12,7 @@ nlock, nlockd - run commands while holding named locks
 
 # SYNOPSIS
 
-**nlock run** [**-n**] [**-t** *seconds*] [**\-\-coalesce** | **\-\-replace**] *name* **\-\-** *command* [*args*...]
+**nlock run** [**-n**] [**-t** *seconds*] [**\-\-coalesce** | **\-\-replace**] [**\-\-slots** *n*] *name* **\-\-** *command* [*args*...]
 
 **nlock list** [**\-\-json** | **-q**] [**-H**]
 
@@ -30,7 +30,8 @@ contain any characters except whitespace and control characters, and may
 not start with **-**. While one **nlock run**
 holds a lock, any other **nlock run** for the same *name* waits until the lock
 is released, then runs its own command. Waiters are served in the order they
-arrived.
+arrived. A lock can instead be shared by up to *n* commands at once with
+**\-\-slots** *n*, which caps how many run in parallel.
 
 Locks are managed by the **nlockd** daemon, which must be running before
 **nlock** is used. **nlock** connects to it over a Unix domain socket (see
@@ -51,6 +52,10 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
         nlock: waiting for 'db' — held by alice (pid 4242) for 02:13: ./migrate --up (2 ahead of you)
 
+    For a lock with several slots, it describes the longest-standing holder:
+
+        nlock: waiting for 'build' — all 4 slots held, longest by pid 4242 for 02:13: make (next in line)
+
     The elapsed time and queue position are as of when the request was
     queued. Nothing is printed when standard error is not a terminal, so
     scripts and cron jobs stay quiet.
@@ -65,7 +70,8 @@ Locks are managed by the **nlockd** daemon, which must be running before
     its behalf, even if the command is still running.
 
 **list** [**\-\-json** | **-q**] [**-H**]
-:   Print the locks currently held, one per line, sorted by name. By default
+:   Print the locks currently held, one line per holder, sorted by name and
+    then by how long each holder has held the lock, longest first. By default
     the output is whitespace-aligned columns with a header row. When no
     locks are held, only the header row is printed, and **list** still exits
     **0**. The columns are:
@@ -85,6 +91,10 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
     **WAITERS**
     :   Number of clients queued for the lock.
+
+    **SLOTS**
+    :   How many of the lock's slots are taken, out of how many, such as
+        **3/4**. A lock without **\-\-slots** shows **1/1**.
 
     **CMD**
     :   The command running under the lock. It is always the last column,
@@ -134,6 +144,14 @@ after **\-\-**, where it belongs to *command*.
     With **\-\-nonblock**, a held lock still fails without replacing
     anyone. Cannot be combined with **\-\-coalesce**.
 
+**\-\-slots** *n*
+:   Let up to *n* (a positive integer) clients hold the lock at once; the
+    default is **1**. Once every slot is taken, further requests queue, and
+    are served in the order they arrived as slots free up. Every request for
+    a lock that is in use must give the same *n*: one that does not exits
+    with status **64** without running *command*. Once nobody holds or waits
+    for the lock, the next request may use a different *n*.
+
     Both options treat every request for the same *name* as the same job,
     whatever its command. Put anything that distinguishes jobs, such as a
     deploy target, in the name. When standard error is a terminal, a client
@@ -142,15 +160,17 @@ after **\-\-**, where it belongs to *command*.
 ## list
 
 **\-\-json**
-:   Print one JSON object per lock, one per line, with the fields **name**,
-    **pid**, **waiters**, **acquired_at** (seconds since the Unix epoch)
+:   Print one JSON object per holder, one per line, with the fields
+    **name**, **pid**, **waiters**, **slots** (the lock's size, as given to
+    **\-\-slots**), **acquired_at** (seconds since the Unix epoch)
     and **command**. Unlike the table, nothing is escaped, so prefer this
     format in scripts. **command** is the command's arguments joined with
     spaces, so quoting is lost, and is truncated like the CMD column.
     Cannot be combined with **-q**.
 
 **-q**, **\-\-quiet**
-:   Print only lock names, one per line.
+:   Print only lock names, one per line. A lock with several holders is
+    printed once.
 
 **-H**, **\-\-no-header**
 :   Omit the header row from the default output.
@@ -268,7 +288,8 @@ told apart from **nlock** failing.
 
 **64** (EX_USAGE)
 :   The arguments are invalid. A short usage message is printed to standard
-    error.
+    error. Also used, with its own message, when the lock is in use with a
+    different **\-\-slots**.
 
 **69** (EX_UNAVAILABLE)
 :   **nlockd** is not running, cannot be reached, or its socket belongs to
@@ -315,6 +336,10 @@ Rebuild on every save, but never queue more than one extra build:
 Deploy only the newest pushed revision, dropping any that are still waiting:
 
     nlock run --replace deploy -- ./deploy.sh "$newrev"
+
+Run at most four GPU jobs at a time, from any number of terminals:
+
+    nlock run --slots 4 gpu -- python train.py
 
 Run a shell pipeline under a lock:
 
