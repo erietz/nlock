@@ -2,9 +2,13 @@ const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
 const log = nlock.Logger.log;
+const LockedStringMap = @import("hash.zig").LockedStringMap;
+const queue = @import("queue.zig");
+const Lock = queue.Lock;
+const Waiter = queue.Waiter;
 
 /// Every lock currently held, by name.
-const LockMap = nlock.LockedStringMap(nlock.Lock);
+const LockMap = LockedStringMap(Lock);
 
 pub const std_options: std.Options = .{
     // Release builds would otherwise compile out debug messages, leaving
@@ -416,7 +420,7 @@ fn handleAcquireLockRequest(
         // A queued client has not started its run yet, so that run happens
         // after whatever triggered this request: no need to queue another.
         if (lock_request.if_pending == .skip) if (existing_lock.waiters.last) |last_node| {
-            const pending: *nlock.Waiter = @fieldParentPtr("node", last_node);
+            const pending: *Waiter = @fieldParentPtr("node", last_node);
             // Serialized while holding the mutex: the waiter and its command
             // may be gone as soon as it is released.
             const coalesced_response = (nlock.LockResponse{ .coalesced = .{
@@ -467,7 +471,7 @@ fn handleAcquireLockRequest(
         };
         defer allocator.free(queued_response);
 
-        var waiter = nlock.Waiter{
+        var waiter = Waiter{
             .event = .unset,
             .command = command_copy,
             .pid = peer.pid,
@@ -477,7 +481,7 @@ fn handleAcquireLockRequest(
             // their place. Each is woken and told who replaced it.
             var replaced_count: usize = 0;
             while (existing_lock.waiters.popFirst()) |node| : (replaced_count += 1) {
-                const replaced: *nlock.Waiter = @fieldParentPtr("node", node);
+                const replaced: *Waiter = @fieldParentPtr("node", node);
                 replaced.replaced_by = peer.pid;
                 replaced.event.set(io);
             }
@@ -571,7 +575,7 @@ fn handleAcquireLockRequest(
         };
         errdefer allocator.free(command_copy);
 
-        const lock = nlock.Lock{
+        const lock = Lock{
             .command = command_copy,
             .pid = peer.pid,
             .acquired_at = nowSeconds(io),
@@ -613,7 +617,7 @@ fn abandonWait(
     allocator: std.mem.Allocator,
     map: *LockMap,
     name: []const u8,
-    waiter: *nlock.Waiter,
+    waiter: *Waiter,
 ) void {
     map.lock();
     if (!waiter.event.isSet()) {
@@ -644,7 +648,7 @@ fn releaseLock(
 
     const lock_ptr = map.map.getPtr(name) orelse return false;
     if (lock_ptr.waiters.popFirst()) |waiter_node| {
-        var w: *nlock.Waiter = @fieldParentPtr("node", waiter_node);
+        var w: *Waiter = @fieldParentPtr("node", waiter_node);
         // Free previous holder's command before taking ownership of the waiter's command
         allocator.free(lock_ptr.command);
         // The lock now belongs to the waiter
@@ -701,4 +705,9 @@ fn handleListLocksRequest(
     }
 
     for (lines.items) |line| try nlock.writeLine(writer, line);
+}
+
+test {
+    _ = @import("hash.zig");
+    _ = queue;
 }

@@ -3,11 +3,7 @@ const builtin = @import("builtin");
 const Io = std.Io;
 const build_zig_zon = @import("build_zig_zon");
 const protocol = @import("protocol.zig");
-const hash = @import("hash.zig");
-const queue = @import("queue.zig");
 pub const Logger = @import("Logger.zig");
-pub const printer = @import("printer.zig");
-pub const cli = @import("cli.zig");
 pub const peer = @import("peer.zig");
 
 pub const SOCKET_NAME = "nlock.sock";
@@ -101,9 +97,6 @@ pub const writeLine = protocol.writeLine;
 pub const max_name_len = protocol.max_name_len;
 pub const max_command_len = protocol.max_command_len;
 pub const max_message_len = protocol.max_message_len;
-pub const LockedStringMap = hash.LockedStringMap;
-pub const Lock = queue.Lock;
-pub const Waiter = queue.Waiter;
 
 // Rather than @cImport("sysexits.h"), which is removed in zig 17, we define
 // the constants ourselves. See https://man.openbsd.org/sysexits

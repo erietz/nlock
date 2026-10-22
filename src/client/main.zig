@@ -2,6 +2,8 @@ const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
 const log = nlock.Logger.log;
+const cli = @import("cli.zig");
+const printer = @import("printer.zig");
 
 pub const std_options: std.Options = .{
     // Release builds would otherwise compile out debug messages, leaving
@@ -23,9 +25,9 @@ const RunLockedError = error{
 };
 
 pub fn main(init: std.process.Init) void {
-    nlock.printer.init(init.io);
+    printer.init(init.io);
     nlock.Logger.init(nlock.Logger.getLogLevel(init.environ_map) catch blk: {
-        nlock.printer.eprint(
+        printer.eprint(
             "nlock: ignoring invalid {s}; expected debug, info, warn, error or none\n",
             .{nlock.Logger.ENV_NLOCK_LOG_LEVEL},
         ) catch {};
@@ -33,7 +35,7 @@ pub fn main(init: std.process.Init) void {
     });
 
     const status = run(init) catch |err| {
-        nlock.printer.eprint("nlock: unexpected error: {s}\n", .{@errorName(err)}) catch {};
+        printer.eprint("nlock: unexpected error: {s}\n", .{@errorName(err)}) catch {};
         nlock.SysExits.software.exit();
     };
     std.process.exit(status);
@@ -43,9 +45,9 @@ pub fn main(init: std.process.Init) void {
 pub fn run(init: std.process.Init) !u8 {
     const args = init.minimal.args.toSlice(init.gpa) catch nlock.SysExits.oserr.exit();
     defer init.gpa.free(args);
-    const command = nlock.cli.Command.parseArgs(args) catch |err| switch (err) {
-        nlock.cli.UsageError.InvalidArguments => {
-            nlock.printer.eprint("{s}", .{nlock.cli.USAGE}) catch nlock.SysExits.oserr.exit();
+    const command = cli.Command.parseArgs(args) catch |err| switch (err) {
+        cli.UsageError.InvalidArguments => {
+            printer.eprint("{s}", .{cli.USAGE}) catch nlock.SysExits.oserr.exit();
             nlock.SysExits.usage.exit();
         },
     };
@@ -54,7 +56,7 @@ pub fn run(init: std.process.Init) !u8 {
     // first to avoid unnecessary errors if the daemon is not running.
     switch (command) {
         .help => {
-            nlock.printer.print("{s}", .{nlock.cli.HELP}) catch nlock.SysExits.oserr.exit();
+            printer.print("{s}", .{cli.HELP}) catch nlock.SysExits.oserr.exit();
             nlock.SysExits.ok.exit();
         },
         .version => {
@@ -70,7 +72,7 @@ pub fn run(init: std.process.Init) !u8 {
 
     const address = std.Io.net.UnixAddress.init(socket_path) catch nlock.SysExits.osfile.exit();
     const stream = address.connect(init.io) catch |err| {
-        nlock.printer.eprint(
+        printer.eprint(
             "nlock: cannot reach nlockd at {s}: {s}; is it running?\n",
             .{ socket_path, @errorName(err) },
         ) catch nlock.SysExits.oserr.exit();
@@ -79,14 +81,14 @@ pub fn run(init: std.process.Init) !u8 {
     defer stream.close(init.io);
     verifyServer(stream) catch |err| switch (err) {
         error.UntrustedLockServer => {
-            nlock.printer.eprint(
+            printer.eprint(
                 "nlock: refusing to use {s}: it is served by another user's nlockd\n",
                 .{socket_path},
             ) catch nlock.SysExits.oserr.exit();
             nlock.SysExits.unavailable.exit();
         },
         else => {
-            nlock.printer.eprint(
+            printer.eprint(
                 "nlock: cannot verify who serves {s}: {s}\n",
                 .{ socket_path, @errorName(err) },
             ) catch nlock.SysExits.oserr.exit();
@@ -110,21 +112,21 @@ pub fn run(init: std.process.Init) !u8 {
     switch (command) {
         .run => |options| return runLocked(ctx, options) catch |err| switch (err) {
             RunLockedError.LockAlreadyAcquired => {
-                nlock.printer.eprint(
+                printer.eprint(
                     "nlock: '{s}' is held by another process\n",
                     .{options.name},
                 ) catch nlock.SysExits.oserr.exit();
                 nlock.SysExits.tempfail.exit();
             },
             RunLockedError.LockAcquireTimeout => {
-                nlock.printer.eprint(
+                printer.eprint(
                     "nlock: timed out waiting for '{s}'\n",
                     .{options.name},
                 ) catch nlock.SysExits.oserr.exit();
                 nlock.SysExits.tempfail.exit();
             },
             RunLockedError.LockReleaseFailed => {
-                nlock.printer.eprint(
+                printer.eprint(
                     "nlock: failed to release '{s}'; see the nlockd logs\n",
                     .{options.name},
                 ) catch nlock.SysExits.oserr.exit();
@@ -144,7 +146,7 @@ pub fn run(init: std.process.Init) !u8 {
 }
 
 fn printVersion() !void {
-    try nlock.printer.print("nlock {s}\n", .{nlock.version()});
+    try printer.print("nlock {s}\n", .{nlock.version()});
 }
 
 /// Refuses to talk to a daemon run by another user (other than root), in case
@@ -159,7 +161,7 @@ fn verifyServer(stream: std.Io.net.Stream) !void {
 }
 
 /// Runs the command under the lock and returns its exit status.
-pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
+pub fn runLocked(ctx: Context, options: cli.RunOptions) !u8 {
     // Only explain a wait, or not running, to a person: scripts and cron jobs
     // would just get noise on stderr.
     const report = Io.File.stderr().isTty(ctx.io) catch false;
@@ -210,7 +212,7 @@ pub fn runLocked(ctx: Context, options: nlock.cli.RunOptions) !u8 {
     }
 }
 
-pub fn runList(ctx: Context, options: nlock.cli.ListOptions) !void {
+pub fn runList(ctx: Context, options: cli.ListOptions) !void {
     const list_message = try (nlock.LockRequest{ .list = {} }).toJson(ctx.allocator);
     defer ctx.allocator.free(list_message);
 
@@ -232,7 +234,7 @@ pub fn runList(ctx: Context, options: nlock.cli.ListOptions) !void {
     else
         try formatLockInfoTable(arena, lock_infos.items, options.header, nowSeconds(ctx.io));
 
-    try nlock.printer.print("{s}", .{output});
+    try printer.print("{s}", .{output});
 }
 
 fn lockInfoLessThan(_: void, a: nlock.LockInfo, b: nlock.LockInfo) bool {
@@ -443,7 +445,7 @@ pub fn acquireLock(
     allocator: std.mem.Allocator,
     writer: *Io.Writer,
     reader: *Io.Reader,
-    options: nlock.cli.RunOptions,
+    options: cli.RunOptions,
     report: bool,
 ) !nlock.LockResponseStatus {
     const command_str = try formatCommand(allocator, options.command);
@@ -476,7 +478,7 @@ pub fn acquireLock(
                 .replaced => |replaced| try formatReplacedMessage(arena, options.name, replaced),
                 .ok, .busy, .timeout => null,
             };
-            if (explanation) |m| nlock.printer.eprint("{s}", .{m}) catch {};
+            if (explanation) |m| printer.eprint("{s}", .{m}) catch {};
         }
 
         if (status != .queued) return status;
@@ -707,7 +709,7 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
     };
 
     var child = std.process.spawn(io, spawnOptions) catch |err| {
-        nlock.printer.eprint("nlock: {s}: {s}\n", .{ command[0], @errorName(err) }) catch {};
+        printer.eprint("nlock: {s}: {s}\n", .{ command[0], @errorName(err) }) catch {};
         return switch (err) {
             error.FileNotFound => exit_not_found,
             else => exit_not_executable,
@@ -722,7 +724,7 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
     }
 
     const term = child.wait(io) catch |err| {
-        nlock.printer.eprint("nlock: failed to wait for {s}: {s}\n", .{ command[0], @errorName(err) }) catch {};
+        printer.eprint("nlock: failed to wait for {s}: {s}\n", .{ command[0], @errorName(err) }) catch {};
         return 1;
     };
 
@@ -740,4 +742,9 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
             return 1;
         },
     }
+}
+
+test {
+    _ = cli;
+    _ = printer;
 }
