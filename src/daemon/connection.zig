@@ -3,6 +3,7 @@ const Io = std.Io;
 const nlock = @import("nlock");
 const protocol = nlock.protocol;
 const log = nlock.Logger.log;
+const queue = @import("queue.zig");
 const locks = @import("locks.zig");
 const LockMap = locks.LockMap;
 
@@ -68,6 +69,23 @@ fn handleConnection(
         log(.err, "Received acquire request with an invalid lock name ({d} bytes)", .{req.name.len});
         return error.InvalidLockName;
     }
+
+    // Borrows the command from `req_parsed`, which outlives it.
+    var client: queue.Client = .{
+        .command = req.command,
+        .pid = peer.pid,
+    };
+    // Whatever happens below, the client must not stay in the lock's queue
+    // or holders once this connection ends. If it goes away while holding
+    // the lock (e.g. it was killed by a signal), release the lock on its
+    // behalf so it is not held forever.
+    defer {
+        if (client.state == .holding) {
+            log(.info, "Client disconnected while holding lock '{s}'. Releasing it.", .{req.name});
+        }
+        locks.leave(io, allocator, map, req.name, &client);
+    }
+
     const holding = locks.handleAcquireLockRequest(
         io,
         allocator,
@@ -75,20 +93,13 @@ fn handleConnection(
         peer,
         map,
         &writer.interface,
+        &client,
     ) catch |err| {
         log(.err, "Failed to handle acquire lock request: {s}", .{@errorName(err)});
         return err;
     };
     // Busy, coalesced, replaced or timed out: nothing to release.
     if (!holding) return;
-
-    // If the client goes away without releasing (e.g. it was killed by a
-    // signal), release the lock on its behalf so it is not held forever.
-    var released = false;
-    defer if (!released) {
-        log(.info, "Client disconnected while holding lock '{s}'. Releasing it.", .{req.name});
-        _ = locks.releaseLock(io, allocator, map, req.name);
-    };
 
     // The client executes the command and then sends a release lock request
     log(.debug, "Waiting for release lock request from client", .{});
@@ -98,15 +109,9 @@ fn handleConnection(
         // A connection may only release the lock it acquired, so the request
         // does not name one.
         .release => {
-            // Marked before releasing: once the lock is passed on, nothing
-            // after this point (e.g. failing to send the reply) may release
-            // it again on disconnect, or it would release the next holder's.
-            released = true;
             log(.info, "Releasing lock for name '{s}'", .{req.name});
-            if (!locks.releaseLock(io, allocator, map, req.name)) {
-                log(.err, "No lock found for name '{s}' to release.", .{req.name});
-                return error.LockNotFound;
-            }
+            // Leaves the client idle, so the deferred `leave` does nothing.
+            locks.leave(io, allocator, map, req.name, &client);
             const lock_response = try (protocol.LockResponse{ .ok = {} }).toJson(allocator);
             defer allocator.free(lock_response);
             try protocol.writeLine(&writer.interface, lock_response);
