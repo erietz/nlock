@@ -313,6 +313,42 @@ test "run rejects lock names containing whitespace" {
     try std.testing.expectEqual(Term{ .exited = 64 }, result.term);
 }
 
+test "daemon rejects invalid lock names sent directly to its socket" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const address = try std.Io.net.UnixAddress.init(daemon.socket_path);
+    for ([_][]const u8{ "", "my lock", "a\nb", "x" ** (protocol.max_name_len + 1) }) |name| {
+        const stream = try address.connect(io);
+        defer stream.close(io);
+        var read_buffer: [1024]u8 = undefined;
+        var reader = stream.reader(io, &read_buffer);
+        var write_buffer: [1024]u8 = undefined;
+        var writer = stream.writer(io, &write_buffer);
+
+        const request = try (protocol.LockRequest{ .acquire = .{
+            .name = name,
+            .nonblock = true,
+            .timeout = null,
+            .command = "true",
+        } }).toJson(gpa);
+        defer gpa.free(request);
+        try protocol.writeLine(&writer.interface, request);
+
+        // The daemon hangs up without granting anything.
+        try std.testing.expectEqual(null, try reader.interface.takeDelimiter('\n'));
+    }
+
+    const result = try daemon.client(gpa, io, &.{ "list", "-q" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("", result.stdout);
+}
+
 test "lock is released when the holding client is killed" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;

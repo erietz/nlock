@@ -4,6 +4,29 @@ const Io = std.Io;
 /// Longest lock name, in bytes.
 pub const max_name_len = 255;
 
+/// Returns true if `name` can be used as a lock name. Whitespace and control
+/// characters are rejected so names stay a single field in `nlock list`
+/// output. The client checks names before sending them and the daemon checks
+/// them again, since anything can connect to its socket.
+pub fn isValidLockName(name: []const u8) bool {
+    if (name.len == 0 or name.len > max_name_len) return false;
+    for (name) |ch| {
+        if (std.ascii.isWhitespace(ch) or std.ascii.isControl(ch)) return false;
+    }
+    return true;
+}
+
+test "isValidLockName" {
+    try std.testing.expect(isValidLockName("build"));
+    try std.testing.expect(isValidLockName("db-migrate.v2/prod"));
+    try std.testing.expect(!isValidLockName(""));
+    try std.testing.expect(!isValidLockName("a b"));
+    try std.testing.expect(!isValidLockName("a\tb"));
+    try std.testing.expect(!isValidLockName("a\nb"));
+    try std.testing.expect(isValidLockName("x" ** max_name_len));
+    try std.testing.expect(!isValidLockName("x" ** (max_name_len + 1)));
+}
+
 /// Longest command string the client sends, in bytes. The command is only
 /// shown to people, so the client truncates longer ones.
 pub const max_command_len = 4096;

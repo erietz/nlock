@@ -62,6 +62,12 @@ fn handleConnection(
             return error.UnexpectedRequestType;
         },
     };
+    // Not logged: the name may contain the control characters that make it
+    // invalid.
+    if (!protocol.isValidLockName(req.name)) {
+        log(.err, "Received acquire request with an invalid lock name ({d} bytes)", .{req.name.len});
+        return error.InvalidLockName;
+    }
     const holding = locks.handleAcquireLockRequest(
         io,
         allocator,
