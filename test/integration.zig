@@ -1,6 +1,7 @@
 const std = @import("std");
 const harness = @import("harness.zig");
 const nlock = @import("nlock");
+const protocol = nlock.protocol;
 
 const Term = std.process.Child.Term;
 
@@ -519,16 +520,16 @@ test "a queued client is told who holds the lock before it waits" {
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(io, &write_buffer);
 
-    const request = try (nlock.LockRequest{ .acquire = .{
+    const request = try (protocol.LockRequest{ .acquire = .{
         .name = "db",
         .nonblock = false,
         .timeout = null,
         .command = "true",
     } }).toJson(gpa);
     defer gpa.free(request);
-    try nlock.writeLine(&writer.interface, request);
+    try protocol.writeLine(&writer.interface, request);
 
-    const queued_parsed = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
+    const queued_parsed = try protocol.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
     defer queued_parsed.deinit();
     const queued = queued_parsed.value.queued;
     try std.testing.expectEqual(0, queued.ahead);
@@ -543,9 +544,9 @@ test "a queued client is told who holds the lock before it waits" {
     try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
     holder_done = true;
     try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
-    const acquired_parsed = try nlock.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
+    const acquired_parsed = try protocol.LockResponse.fromJson((try reader.interface.takeDelimiter('\n')).?, gpa);
     defer acquired_parsed.deinit();
-    try std.testing.expectEqual(nlock.LockResponseStatus.ok, std.meta.activeTag(acquired_parsed.value));
+    try std.testing.expectEqual(protocol.LockResponseStatus.ok, std.meta.activeTag(acquired_parsed.value));
 }
 
 test "--coalesce queues if nothing is pending, and otherwise exits 0 without running" {
@@ -663,7 +664,7 @@ test "long commands run, and are shown truncated" {
     // Together far longer than a message may be, so the command must be
     // truncated before it is sent. Several arguments, because Linux limits
     // a single one to 128 KiB.
-    const long_arg = "x" ** nlock.max_message_len;
+    const long_arg = "x" ** protocol.max_message_len;
     const long_args = [_][]const u8{long_arg} ** 4;
 
     const echo = try std.mem.concat(gpa, []const u8, &.{ &.{ "run", "mylock", "--", "echo" }, &long_args });
@@ -693,7 +694,7 @@ test "long commands run, and are shown truncated" {
     try std.testing.expectEqual(Term{ .exited = 0 }, listed.term);
     const parsed = try std.json.parseFromSlice(struct { command: []const u8 }, gpa, listed.stdout, .{ .ignore_unknown_fields = true });
     defer parsed.deinit();
-    try std.testing.expectEqual(nlock.max_command_len, parsed.value.command.len);
+    try std.testing.expectEqual(protocol.max_command_len, parsed.value.command.len);
     try std.testing.expect(std.mem.endsWith(u8, parsed.value.command, "..."));
 
     try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });

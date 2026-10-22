@@ -19,12 +19,12 @@ pub fn runServer(init: std.process.Init) !void {
     // Everything the daemon creates (lock file, socket) is for this user only.
     _ = std.c.umask(0o077);
 
-    const socket_path = try nlock.getSocketPath(gpa, init.environ_map);
+    const socket_path = try nlock.paths.getSocketPath(gpa, init.environ_map);
     defer gpa.free(socket_path);
 
     // The fallback directory has a predictable name in the shared /tmp, so
     // make sure it is ours before putting the socket and lock file in it.
-    const fallback_dir = try nlock.fallbackSocketDir(gpa);
+    const fallback_dir = try nlock.paths.fallbackSocketDir(gpa);
     defer gpa.free(fallback_dir);
     if (std.mem.eql(u8, std.fs.path.dirname(socket_path) orelse "", fallback_dir)) {
         try makePrivateDir(io, std.Io.Dir.cwd(), fallback_dir);

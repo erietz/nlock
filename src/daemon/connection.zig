@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
+const protocol = nlock.protocol;
 const log = nlock.Logger.log;
 const locks = @import("locks.zig");
 const LockMap = locks.LockMap;
@@ -31,7 +32,7 @@ fn handleConnection(
 ) !void {
     defer stream.close(io);
     // On the heap: connection tasks may run on small stacks.
-    const read_buffer = try allocator.alloc(u8, nlock.max_message_len);
+    const read_buffer = try allocator.alloc(u8, protocol.max_message_len);
     defer allocator.free(read_buffer);
     var reader = stream.reader(io, read_buffer);
     var write_buffer: [1024]u8 = undefined;
@@ -100,9 +101,9 @@ fn handleConnection(
                 log(.err, "No lock found for name '{s}' to release.", .{req.name});
                 return error.LockNotFound;
             }
-            const lock_response = try (nlock.LockResponse{ .ok = {} }).toJson(allocator);
+            const lock_response = try (protocol.LockResponse{ .ok = {} }).toJson(allocator);
             defer allocator.free(lock_response);
-            try nlock.writeLine(&writer.interface, lock_response);
+            try protocol.writeLine(&writer.interface, lock_response);
         },
         else => |release_req| {
             log(.debug, "Received unexpected request type: {s}", .{@tagName(release_req)});
@@ -111,16 +112,16 @@ fn handleConnection(
     }
 }
 
-fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !std.json.Parsed(nlock.LockRequest) {
+fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !std.json.Parsed(protocol.LockRequest) {
     const message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
     log(.debug, "Received lock request: {s}", .{message});
-    return nlock.LockRequest.fromJson(message, allocator);
+    return protocol.LockRequest.fromJson(message, allocator);
 }
 
 test "readRequest parses a valid LockRequest where command contains newlines" {
     const message = "{\"acquire\":{\"name\":\"my_lock\",\"nonblock\":false,\"timeout\":null,\"command\":\"echo 'Hello, World!'\\necho 'This is a test.'\\n\"}}\n";
     const allocator = std.testing.allocator;
-    const expected_request: nlock.LockRequest.Acquire = .{
+    const expected_request: protocol.LockRequest.Acquire = .{
         .name = "my_lock",
         .nonblock = false,
         .timeout = null,

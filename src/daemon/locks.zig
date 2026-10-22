@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
+const protocol = nlock.protocol;
 const log = nlock.Logger.log;
 const LockedStringMap = @import("hash.zig").LockedStringMap;
 const queue = @import("queue.zig");
@@ -20,7 +21,7 @@ const max_timeout_s: u64 = 10 * 365 * std.time.s_per_day;
 pub fn handleAcquireLockRequest(
     io: Io,
     allocator: std.mem.Allocator,
-    lock_request: nlock.LockRequest.Acquire,
+    lock_request: protocol.LockRequest.Acquire,
     peer: nlock.peer.Credentials,
     map: *LockMap,
     writer: *Io.Writer,
@@ -38,7 +39,7 @@ pub fn handleAcquireLockRequest(
             const pending: *Waiter = @fieldParentPtr("node", last_node);
             // Serialized while holding the mutex: the waiter and its command
             // may be gone as soon as it is released.
-            const coalesced_response = (nlock.LockResponse{ .coalesced = .{
+            const coalesced_response = (protocol.LockResponse{ .coalesced = .{
                 .pending = .{ .pid = pending.pid, .command = pending.command },
                 .waiters = existing_lock.waiters.len(),
             } }).toJson(allocator) catch |err| {
@@ -48,15 +49,15 @@ pub fn handleAcquireLockRequest(
             map.unlock();
             defer allocator.free(coalesced_response);
             log(.info, "Lock '{s}' already has a pending run. Not queueing.", .{lock_request.name});
-            try nlock.writeLine(writer, coalesced_response);
+            try protocol.writeLine(writer, coalesced_response);
             return false;
         };
 
         if (lock_request.nonblock) {
             map.unlock();
-            const busy_response = try (nlock.LockResponse{ .busy = {} }).toJson(allocator);
+            const busy_response = try (protocol.LockResponse{ .busy = {} }).toJson(allocator);
             defer allocator.free(busy_response);
-            try nlock.writeLine(writer, busy_response);
+            try protocol.writeLine(writer, busy_response);
             return false;
         }
 
@@ -70,7 +71,7 @@ pub fn handleAcquireLockRequest(
         // Tell the client who it is waiting for. Serialized now, while the
         // holder cannot change, but sent after releasing the mutex.
         const ahead = if (replace) 0 else existing_lock.waiters.len();
-        const queued_response = (nlock.LockResponse{ .queued = .{
+        const queued_response = (protocol.LockResponse{ .queued = .{
             .holder = .{
                 .name = lock_request.name,
                 .pid = existing_lock.pid,
@@ -107,7 +108,7 @@ pub fn handleAcquireLockRequest(
         existing_lock.waiters.append(&waiter.node);
         map.unlock();
 
-        nlock.writeLine(writer, queued_response) catch |err| {
+        protocol.writeLine(writer, queued_response) catch |err| {
             abandonWait(io, allocator, map, lock_request.name, &waiter);
             return err;
         };
@@ -139,9 +140,9 @@ pub fn handleAcquireLockRequest(
                         }
                         map.unlock();
                         allocator.free(command_copy);
-                        const timeout_response = try (nlock.LockResponse{ .timeout = {} }).toJson(allocator);
+                        const timeout_response = try (protocol.LockResponse{ .timeout = {} }).toJson(allocator);
                         defer allocator.free(timeout_response);
-                        try nlock.writeLine(writer, timeout_response);
+                        try protocol.writeLine(writer, timeout_response);
                         return false;
                     }
                     map.unlock();
@@ -166,11 +167,11 @@ pub fn handleAcquireLockRequest(
             // the lock and is still ours.
             allocator.free(command_copy);
             log(.info, "Waiter for lock '{s}' was replaced by pid {d}", .{ lock_request.name, by_pid });
-            const replaced_response = try (nlock.LockResponse{ .replaced = .{
+            const replaced_response = try (protocol.LockResponse{ .replaced = .{
                 .pid = by_pid,
             } }).toJson(allocator);
             defer allocator.free(replaced_response);
-            try nlock.writeLine(writer, replaced_response);
+            try protocol.writeLine(writer, replaced_response);
             return false;
         }
     } else {
@@ -217,9 +218,9 @@ pub fn handleAcquireLockRequest(
     errdefer _ = releaseLock(io, allocator, map, lock_request.name);
 
     log(.info, "Sending acquired response for lock {s}.", .{lock_request.name});
-    const acquired_response = try (nlock.LockResponse{ .ok = {} }).toJson(allocator);
+    const acquired_response = try (protocol.LockResponse{ .ok = {} }).toJson(allocator);
     defer allocator.free(acquired_response);
-    try nlock.writeLine(writer, acquired_response);
+    try protocol.writeLine(writer, acquired_response);
     return true;
 }
 
@@ -305,7 +306,7 @@ pub fn handleListLocksRequest(
         var it = map.map.iterator();
         while (it.next()) |entry| {
             const lock = entry.value_ptr;
-            const line = try (nlock.LockInfo{
+            const line = try (protocol.LockInfo{
                 .name = entry.key_ptr.*,
                 .pid = lock.pid,
                 .waiters = lock.waiters.len(),
@@ -319,5 +320,5 @@ pub fn handleListLocksRequest(
         }
     }
 
-    for (lines.items) |line| try nlock.writeLine(writer, line);
+    for (lines.items) |line| try protocol.writeLine(writer, line);
 }

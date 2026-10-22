@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
+const protocol = nlock.protocol;
 const log = nlock.Logger.log;
 const cli = @import("cli.zig");
 const printer = @import("printer.zig");
@@ -15,10 +16,10 @@ pub fn runList(
     reader: *Io.Reader,
     options: cli.ListOptions,
 ) !void {
-    const list_message = try (nlock.LockRequest{ .list = {} }).toJson(allocator);
+    const list_message = try (protocol.LockRequest{ .list = {} }).toJson(allocator);
     defer allocator.free(list_message);
 
-    try nlock.writeLine(writer, list_message);
+    try protocol.writeLine(writer, list_message);
 
     // Everything below is short-lived, so free it all at once.
     var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -27,7 +28,7 @@ pub fn runList(
 
     const lock_infos = try readLockInfos(reader, arena);
     // The daemon walks a hash map, so impose a stable order.
-    std.mem.sort(nlock.LockInfo, lock_infos.items, {}, lockInfoLessThan);
+    std.mem.sort(protocol.LockInfo, lock_infos.items, {}, lockInfoLessThan);
 
     const output = if (options.json)
         try formatLockInfoJson(arena, lock_infos.items)
@@ -39,7 +40,7 @@ pub fn runList(
     try printer.print("{s}", .{output});
 }
 
-fn lockInfoLessThan(_: void, a: nlock.LockInfo, b: nlock.LockInfo) bool {
+fn lockInfoLessThan(_: void, a: protocol.LockInfo, b: protocol.LockInfo) bool {
     return std.mem.lessThan(u8, a.name, b.name);
 }
 
@@ -48,19 +49,19 @@ fn lockInfoLessThan(_: void, a: nlock.LockInfo, b: nlock.LockInfo) bool {
 fn readLockInfos(
     reader: *Io.Reader,
     arena: std.mem.Allocator,
-) !std.ArrayList(nlock.LockInfo) {
-    var lock_infos: std.ArrayList(nlock.LockInfo) = .empty;
+) !std.ArrayList(protocol.LockInfo) {
+    var lock_infos: std.ArrayList(protocol.LockInfo) = .empty;
     while (true) {
         const response_message = try (reader.takeDelimiter('\n')) orelse break;
         log(.debug, "Received lock info: {s}", .{response_message});
-        try lock_infos.append(arena, try nlock.LockInfo.fromJsonLeaky(response_message, arena));
+        try lock_infos.append(arena, try protocol.LockInfo.fromJsonLeaky(response_message, arena));
     }
     return lock_infos;
 }
 
 /// `nlock list --json`: one JSON object per lock, one per line. Unlike the
 /// table, names and commands are not escaped.
-fn formatLockInfoJson(allocator: std.mem.Allocator, lock_infos: []const nlock.LockInfo) ![]const u8 {
+fn formatLockInfoJson(allocator: std.mem.Allocator, lock_infos: []const protocol.LockInfo) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (lock_infos) |lock_info| {
         try out.appendSlice(allocator, try lock_info.toJson(allocator));
@@ -70,7 +71,7 @@ fn formatLockInfoJson(allocator: std.mem.Allocator, lock_infos: []const nlock.Lo
 }
 
 /// `nlock list --quiet`: lock names only, one per line.
-fn formatLockNames(allocator: std.mem.Allocator, lock_infos: []const nlock.LockInfo) ![]const u8 {
+fn formatLockNames(allocator: std.mem.Allocator, lock_infos: []const protocol.LockInfo) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (lock_infos) |lock_info| {
         try appendEscaped(allocator, &out, lock_info.name);
@@ -100,7 +101,7 @@ const column_separator = "  ";
 /// header row, in the style of `ps`.
 fn formatLockInfoTable(
     allocator: std.mem.Allocator,
-    lock_infos: []const nlock.LockInfo,
+    lock_infos: []const protocol.LockInfo,
     header: bool,
     now: i64,
 ) ![]const u8 {
@@ -159,7 +160,7 @@ test "formatLockInfoTable aligns columns and leaves CMD last and unpadded" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const lock_infos = [_]nlock.LockInfo{
+    const lock_infos = [_]protocol.LockInfo{
         .{ .name = "build", .pid = 123, .waiters = 0, .acquired_at = 1000, .command = "make -j8" },
         .{ .name = "deploy-prod", .pid = 0, .waiters = 12, .acquired_at = 0, .command = "sh -c 'a\nb'" },
     };

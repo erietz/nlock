@@ -1,5 +1,5 @@
 const std = @import("std");
-const max_name_len = @import("nlock").max_name_len;
+const max_name_len = @import("nlock").protocol.max_name_len;
 
 const SYNOPSIS =
     \\Usage: nlock run [options] <name> -- <command> [args...]

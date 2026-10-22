@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
+const protocol = nlock.protocol;
 const log = nlock.Logger.log;
 const cli = @import("cli.zig");
 const printer = @import("printer.zig");
@@ -69,7 +70,7 @@ pub fn run(init: std.process.Init) !u8 {
         .run, .list => {},
     }
 
-    const socket_path = try nlock.getSocketPath(init.gpa, init.environ_map);
+    const socket_path = try nlock.paths.getSocketPath(init.gpa, init.environ_map);
     defer init.gpa.free(socket_path);
     log(.debug, "Connecting to lock server at {s}", .{socket_path});
 
@@ -102,7 +103,7 @@ pub fn run(init: std.process.Init) !u8 {
     var write_buffer: [1024]u8 = undefined;
     var writer = stream.writer(init.io, &write_buffer);
 
-    var read_buffer: [nlock.max_message_len]u8 = undefined;
+    var read_buffer: [protocol.max_message_len]u8 = undefined;
     var reader = stream.reader(init.io, &read_buffer);
 
     const ctx = Context{
@@ -178,7 +179,7 @@ pub fn runLocked(ctx: Context, options: cli.RunOptions) !u8 {
     );
 
     switch (acquire_status) {
-        nlock.LockResponseStatus.ok => {
+        protocol.LockResponseStatus.ok => {
             log(.debug, "Lock acquired successfully. Running command", .{});
             // runCommand reports its own failures as an exit status, so the
             // lock is always released below.
@@ -188,7 +189,7 @@ pub fn runLocked(ctx: Context, options: cli.RunOptions) !u8 {
             const release_status = try lock.releaseLock(ctx.allocator, ctx.writer, ctx.reader);
 
             switch (release_status) {
-                nlock.LockResponseStatus.ok => {
+                protocol.LockResponseStatus.ok => {
                     log(.debug, "Lock released successfully", .{});
                     return status;
                 },
@@ -198,20 +199,20 @@ pub fn runLocked(ctx: Context, options: cli.RunOptions) !u8 {
                 },
             }
         },
-        nlock.LockResponseStatus.busy => {
+        protocol.LockResponseStatus.busy => {
             return RunLockedError.LockAlreadyAcquired;
         },
-        nlock.LockResponseStatus.timeout => {
+        protocol.LockResponseStatus.timeout => {
             return RunLockedError.LockAcquireTimeout;
         },
         // A run is pending that will start after this request was made,
         // which is what the caller asked for, so this is success.
-        nlock.LockResponseStatus.coalesced, nlock.LockResponseStatus.replaced => {
+        protocol.LockResponseStatus.coalesced, protocol.LockResponseStatus.replaced => {
             log(.debug, "Not running the command: {s}", .{@tagName(acquire_status)});
             return 0;
         },
         // acquireLock reads past queued to the final status.
-        nlock.LockResponseStatus.queued => unreachable,
+        protocol.LockResponseStatus.queued => unreachable,
     }
 }
 

@@ -1,6 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 const nlock = @import("nlock");
+const protocol = nlock.protocol;
 const log = nlock.Logger.log;
 const cli = @import("cli.zig");
 const printer = @import("printer.zig");
@@ -19,10 +20,10 @@ pub fn acquireLock(
     reader: *Io.Reader,
     options: cli.RunOptions,
     report: bool,
-) !nlock.LockResponseStatus {
+) !protocol.LockResponseStatus {
     const command_str = try formatCommand(allocator, options.command);
     defer allocator.free(command_str);
-    const message = try (nlock.LockRequest{ .acquire = .{
+    const message = try (protocol.LockRequest{ .acquire = .{
         .name = options.name,
         .nonblock = options.nonblock,
         .timeout = options.timeout,
@@ -30,13 +31,13 @@ pub fn acquireLock(
         .if_pending = if (options.coalesce) .skip else if (options.replace) .replace else .queue,
     } }).toJson(allocator);
     defer allocator.free(message);
-    try nlock.writeLine(writer, message);
+    try protocol.writeLine(writer, message);
 
     // Every response but queued is final.
     while (true) {
         const response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
         log(.debug, "Received lock response: {s}", .{response_message});
-        const parsed = try nlock.LockResponse.fromJson(response_message, allocator);
+        const parsed = try protocol.LockResponse.fromJson(response_message, allocator);
         defer parsed.deinit();
         const status = std.meta.activeTag(parsed.value);
 
@@ -61,11 +62,11 @@ pub fn acquireLock(
 /// with spaces, truncated to `max_command_len` bytes. Caller owns the result.
 fn formatCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
     const joined = try std.mem.join(allocator, " ", argv);
-    if (joined.len <= nlock.max_command_len) return joined;
+    if (joined.len <= protocol.max_command_len) return joined;
     defer allocator.free(joined);
 
     const ellipsis = "...";
-    var end = nlock.max_command_len - ellipsis.len;
+    var end = protocol.max_command_len - ellipsis.len;
     // Back up to the start of a UTF-8 sequence so the cut does not turn a
     // valid command into invalid UTF-8.
     while (end > 0 and joined[end] & 0xC0 == 0x80) end -= 1;
@@ -79,19 +80,19 @@ test "formatCommand joins arguments and truncates long commands" {
     defer allocator.free(short);
     try std.testing.expectEqualStrings("echo hello", short);
 
-    const exact = try formatCommand(allocator, &.{"x" ** nlock.max_command_len});
+    const exact = try formatCommand(allocator, &.{"x" ** protocol.max_command_len});
     defer allocator.free(exact);
-    try std.testing.expectEqual(nlock.max_command_len, exact.len);
+    try std.testing.expectEqual(protocol.max_command_len, exact.len);
 
-    const long = try formatCommand(allocator, &.{ "echo", "x" ** (2 * nlock.max_command_len) });
+    const long = try formatCommand(allocator, &.{ "echo", "x" ** (2 * protocol.max_command_len) });
     defer allocator.free(long);
-    try std.testing.expectEqual(nlock.max_command_len, long.len);
+    try std.testing.expectEqual(protocol.max_command_len, long.len);
     try std.testing.expect(std.mem.endsWith(u8, long, "xx..."));
 
     // "é" is two bytes; a cut through the middle of one backs up before it.
-    const accents = try formatCommand(allocator, &.{"é" ** nlock.max_command_len});
+    const accents = try formatCommand(allocator, &.{"é" ** protocol.max_command_len});
     defer allocator.free(accents);
-    try std.testing.expect(accents.len <= nlock.max_command_len);
+    try std.testing.expect(accents.len <= protocol.max_command_len);
     try std.testing.expect(std.unicode.utf8ValidateSlice(accents));
 }
 
@@ -101,7 +102,7 @@ test "formatCommand joins arguments and truncates long commands" {
 fn formatCoalescedMessage(
     allocator: std.mem.Allocator,
     name: []const u8,
-    coalesced: nlock.LockResponse.Coalesced,
+    coalesced: protocol.LockResponse.Coalesced,
 ) ![]const u8 {
     const pending = coalesced.pending;
     var out: std.ArrayList(u8) = .empty;
@@ -121,7 +122,7 @@ fn formatCoalescedMessage(
 fn formatReplacedMessage(
     allocator: std.mem.Allocator,
     name: []const u8,
-    replaced: nlock.LockResponse.Replaced,
+    replaced: protocol.LockResponse.Replaced,
 ) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(allocator, "nlock: replaced in the queue for '");
@@ -154,7 +155,7 @@ test "formatCoalescedMessage and formatReplacedMessage" {
 /// `nlock: waiting for 'db' — held by pid 4242 for 02:13: ./migrate --up (2 ahead of you)`
 fn formatQueuedMessage(
     allocator: std.mem.Allocator,
-    holder: nlock.LockInfo,
+    holder: protocol.LockInfo,
     ahead: usize,
     now: i64,
 ) ![]const u8 {
@@ -178,7 +179,7 @@ test "formatQueuedMessage" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const holder: nlock.LockInfo = .{ .name = "db", .pid = 4242, .waiters = 3, .acquired_at = 1000, .command = "./migrate --up" };
+    const holder: protocol.LockInfo = .{ .name = "db", .pid = 4242, .waiters = 3, .acquired_at = 1000, .command = "./migrate --up" };
     try std.testing.expectEqualStrings(
         "nlock: waiting for 'db' — held by pid 4242 for 02:13: ./migrate --up (2 ahead of you)\n",
         try formatQueuedMessage(arena, holder, 2, 1133),
@@ -199,16 +200,16 @@ pub fn releaseLock(
     allocator: std.mem.Allocator,
     writer: *Io.Writer,
     reader: *Io.Reader,
-) !nlock.LockResponseStatus {
-    const release_message = try (nlock.LockRequest{ .release = {} }).toJson(allocator);
+) !protocol.LockResponseStatus {
+    const release_message = try (protocol.LockRequest{ .release = {} }).toJson(allocator);
     defer allocator.free(release_message);
 
-    try nlock.writeLine(writer, release_message);
+    try protocol.writeLine(writer, release_message);
 
     const release_response_message = (try reader.takeDelimiter('\n')) orelse return error.EndOfStream;
     log(.debug, "Received release lock response: {s}", .{release_response_message});
 
-    const release_response = try nlock.LockResponse.fromJson(release_response_message, allocator);
+    const release_response = try protocol.LockResponse.fromJson(release_response_message, allocator);
     defer release_response.deinit();
     return std.meta.activeTag(release_response.value);
 }
