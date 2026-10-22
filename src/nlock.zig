@@ -5,7 +5,7 @@ const log = nlock.Logger.log;
 
 pub const std_options: std.Options = .{
     // Release builds would otherwise compile out debug messages, leaving
-    // NLOCK_LOG_LEVEL=Debug no effect. NLOCK_LOG_LEVEL does the filtering.
+    // NLOCK_LOG_LEVEL=debug no effect. NLOCK_LOG_LEVEL does the filtering.
     .log_level = .debug,
 };
 
@@ -23,15 +23,6 @@ const RunLockedError = error{
 };
 
 pub fn main(init: std.process.Init) void {
-    const status = run(init) catch |err| {
-        nlock.printer.eprint("nlock: unexpected error: {s}\n", .{@errorName(err)}) catch {};
-        nlock.SysExits.software.exit();
-    };
-    std.process.exit(status);
-}
-
-/// Returns the exit status for nlock: the command's for `run`, 0 for `list`.
-pub fn run(init: std.process.Init) !u8 {
     nlock.printer.init(init.io);
     nlock.Logger.init(nlock.Logger.getLogLevel(init.environ_map) catch blk: {
         nlock.printer.eprint(
@@ -41,6 +32,15 @@ pub fn run(init: std.process.Init) !u8 {
         break :blk null;
     });
 
+    const status = run(init) catch |err| {
+        nlock.printer.eprint("nlock: unexpected error: {s}\n", .{@errorName(err)}) catch {};
+        nlock.SysExits.software.exit();
+    };
+    std.process.exit(status);
+}
+
+/// Returns the exit status for nlock: the command's for `run`, 0 for `list`.
+pub fn run(init: std.process.Init) !u8 {
     const args = init.minimal.args.toSlice(init.gpa) catch nlock.SysExits.oserr.exit();
     defer init.gpa.free(args);
     const command = nlock.cli.Command.parseArgs(args) catch |err| switch (err) {

@@ -8,7 +8,7 @@ const LockMap = nlock.LockedStringMap(nlock.Lock);
 
 pub const std_options: std.Options = .{
     // Release builds would otherwise compile out debug messages, leaving
-    // NLOCK_LOG_LEVEL=Debug no effect. NLOCK_LOG_LEVEL does the filtering.
+    // NLOCK_LOG_LEVEL=debug no effect. NLOCK_LOG_LEVEL does the filtering.
     .log_level = .debug,
     .logFn = logFn,
 };
@@ -150,7 +150,7 @@ pub fn runServer(init: std.process.Init) !void {
     log(.info, "nlockd version {s}", .{nlock.version()});
     log(.info, "Server started and listening on {s}", .{socket_path});
 
-    var map = LockMap.init(io, gpa);
+    var map: LockMap = .init(io, gpa);
     // Declared before `group` so this runs after `group.cancel`: no connection
     // tasks remain, so it is safe to walk the inner map without the mutex.
     defer {
