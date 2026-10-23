@@ -257,6 +257,9 @@ pub fn handleListLocksRequest(
         var it = map.map.iterator();
         while (it.next()) |entry| {
             const lock = entry.value_ptr;
+            // TODO: Below traversal is O(n) for waiters, store the count in
+            // the lock itself. Same for holders. Probs less likely to be large
+            // number holders though?
             const waiters = lock.waiters.len();
             // One line per holder, longest-standing first.
             var holder_node = lock.holders.first;
