@@ -31,6 +31,7 @@ pub fn acquireLock(
         .command = command_str,
         .if_pending = if (options.coalesce) .skip else if (options.replace) .replace else .queue,
         .slots = options.slots,
+        .mode = options.mode,
     } }).toJson(allocator);
     defer allocator.free(message);
     try protocol.writeLine(writer, message);
@@ -46,7 +47,7 @@ pub fn acquireLock(
         if (parsed.value == .mismatch) {
             var arena_state = std.heap.ArenaAllocator.init(allocator);
             defer arena_state.deinit();
-            const m = try formatMismatchMessage(arena_state.allocator(), options.name, options.slots, parsed.value.mismatch);
+            const m = try formatMismatchMessage(arena_state.allocator(), options.name, options.slots, options.mode, parsed.value.mismatch);
             printer.eprint("{s}", .{m}) catch {};
         } else if (report) {
             var arena_state = std.heap.ArenaAllocator.init(allocator);
@@ -147,12 +148,18 @@ fn formatMismatchMessage(
     allocator: std.mem.Allocator,
     name: []const u8,
     requested: u32,
+    mode: protocol.Mode,
     mismatch: protocol.LockResponse.Mismatch,
 ) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(allocator, "nlock: '");
     try appendEscaped(allocator, &out, name);
-    try out.print(allocator, "' is in use with --slots {d}, not {d}\n", .{ mismatch.slots, requested });
+    try out.print(allocator, "' is in use with --slots {d}", .{mismatch.slots});
+    switch (mode) {
+        // Shared locks have one slot, so the number was not what differed.
+        .shared => try out.appendSlice(allocator, ", so it cannot be held --shared\n"),
+        .exclusive => try out.print(allocator, ", not {d}\n", .{requested}),
+    }
     return out.items;
 }
 
@@ -174,7 +181,11 @@ test "formatCoalescedMessage and formatReplacedMessage" {
     );
     try std.testing.expectEqualStrings(
         "nlock: 'build' is in use with --slots 4, not 1\n",
-        try formatMismatchMessage(arena, "build", 1, .{ .slots = 4 }),
+        try formatMismatchMessage(arena, "build", 1, .exclusive, .{ .slots = 4 }),
+    );
+    try std.testing.expectEqualStrings(
+        "nlock: 'build' is in use with --slots 4, so it cannot be held --shared\n",
+        try formatMismatchMessage(arena, "build", 1, .shared, .{ .slots = 4 }),
     );
 }
 
@@ -183,6 +194,8 @@ test "formatCoalescedMessage and formatReplacedMessage" {
 /// For a lock with several slots, the holder described is the
 /// longest-standing one:
 /// `nlock: waiting for 'build' — all 4 slots held, longest by pid 4242 for 02:13: make (next in line)`
+/// and for a lock held shared:
+/// `nlock: waiting for 'db' — held shared, longest by pid 4242 for 02:13: ./backup.sh (next in line)`
 fn formatQueuedMessage(
     allocator: std.mem.Allocator,
     holder: protocol.LockInfo,
@@ -194,6 +207,8 @@ fn formatQueuedMessage(
     try appendEscaped(allocator, &out, holder.name);
     if (holder.slots > 1) {
         try out.print(allocator, "' — all {d} slots held, longest", .{holder.slots});
+    } else if (holder.mode == .shared) {
+        try out.appendSlice(allocator, "' — held shared, longest");
     } else {
         try out.appendSlice(allocator, "' — held");
     }
@@ -232,6 +247,13 @@ test "formatQueuedMessage" {
     try std.testing.expectEqualStrings(
         "nlock: waiting for 'db' — all 4 slots held, longest by pid 4242 for 02:13: ./migrate --up (next in line)\n",
         try formatQueuedMessage(arena, slots, 0, 1133),
+    );
+
+    var shared = holder;
+    shared.mode = .shared;
+    try std.testing.expectEqualStrings(
+        "nlock: waiting for 'db' — held shared, longest by pid 4242 for 02:13: ./migrate --up (2 ahead of you)\n",
+        try formatQueuedMessage(arena, shared, 2, 1133),
     );
 }
 

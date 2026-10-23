@@ -99,6 +99,7 @@ const columns = [_]Column{
     .{ .title = "PID", .align_right = true },
     .{ .title = "ELAPSED", .align_right = true },
     .{ .title = "WAITERS", .align_right = true },
+    .{ .title = "MODE" },
     .{ .title = "SLOTS", .align_right = true },
     .{ .title = "CMD" },
 };
@@ -142,7 +143,9 @@ fn formatLockInfoTable(
             if (lock_info.pid > 0) try std.fmt.allocPrint(allocator, "{d}", .{lock_info.pid}) else "-",
             try formatElapsed(allocator, now - lock_info.acquired_at),
             try std.fmt.allocPrint(allocator, "{d}", .{lock_info.waiters}),
-            try std.fmt.allocPrint(allocator, "{d}/{d}", .{ holders, lock_info.slots }),
+            @tagName(lock_info.mode),
+            // Shared holders share the lock's one slot.
+            if (lock_info.mode == .shared) "-" else try std.fmt.allocPrint(allocator, "{d}/{d}", .{ holders, lock_info.slots }),
             command.items,
         });
     }
@@ -185,14 +188,14 @@ test "formatLockInfoTable aligns columns and leaves CMD last and unpadded" {
     };
     const table = try formatLockInfoTable(arena, &lock_infos, true, 1065);
     try std.testing.expectEqualStrings(
-        \\NAME         PID  ELAPSED  WAITERS  SLOTS  CMD
-        \\build        123    01:05        0    1/1  make -j8
-        \\deploy-prod    -    17:45       12    1/1  sh -c 'a\nb'
+        \\NAME         PID  ELAPSED  WAITERS  MODE       SLOTS  CMD
+        \\build        123    01:05        0  exclusive    1/1  make -j8
+        \\deploy-prod    -    17:45       12  exclusive    1/1  sh -c 'a\nb'
         \\
     , table);
 
     const no_header = try formatLockInfoTable(arena, lock_infos[0..1], false, 1065);
-    try std.testing.expectEqualStrings("build  123  01:05  0  1/1  make -j8\n", no_header);
+    try std.testing.expectEqualStrings("build  123  01:05  0  exclusive  1/1  make -j8\n", no_header);
 }
 
 test "formatLockInfoTable and formatLockNames show a lock with several holders" {
@@ -209,14 +212,31 @@ test "formatLockInfoTable and formatLockNames show a lock with several holders" 
     std.mem.sort(protocol.LockInfo, &lock_infos, {}, lockInfoLessThan);
 
     try std.testing.expectEqualStrings(
-        \\NAME   PID  ELAPSED  WAITERS  SLOTS  CMD
-        \\build  123    01:05        0    1/1  make
-        \\pool    20    01:05        1    3/4  a
-        \\pool    10    00:05        1    3/4  c
-        \\pool    30    00:05        1    3/4  b
+        \\NAME   PID  ELAPSED  WAITERS  MODE       SLOTS  CMD
+        \\build  123    01:05        0  exclusive    1/1  make
+        \\pool    20    01:05        1  exclusive    3/4  a
+        \\pool    10    00:05        1  exclusive    3/4  c
+        \\pool    30    00:05        1  exclusive    3/4  b
         \\
     , try formatLockInfoTable(arena, &lock_infos, true, 1065));
     try std.testing.expectEqualStrings("build\npool\n", try formatLockNames(arena, &lock_infos));
+}
+
+test "formatLockInfoTable shows shared holders without a slot count" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const lock_infos = [_]protocol.LockInfo{
+        .{ .name = "db", .pid = 10, .waiters = 1, .mode = .shared, .acquired_at = 1000, .command = "./backup.sh" },
+        .{ .name = "db", .pid = 20, .waiters = 1, .mode = .shared, .acquired_at = 1060, .command = "./report.sh" },
+    };
+    try std.testing.expectEqualStrings(
+        \\NAME  PID  ELAPSED  WAITERS  MODE    SLOTS  CMD
+        \\db     10    01:05        1  shared      -  ./backup.sh
+        \\db     20    00:05        1  shared      -  ./report.sh
+        \\
+    , try formatLockInfoTable(arena, &lock_infos, true, 1065));
 }
 
 test "formatLockInfoTable prints only the header when no locks are held" {
@@ -225,7 +245,7 @@ test "formatLockInfoTable prints only the header when no locks are held" {
     const arena = arena_state.allocator();
 
     try std.testing.expectEqualStrings(
-        "NAME  PID  ELAPSED  WAITERS  SLOTS  CMD\n",
+        "NAME  PID  ELAPSED  WAITERS  MODE  SLOTS  CMD\n",
         try formatLockInfoTable(arena, &.{}, true, 0),
     );
     try std.testing.expectEqualStrings("", try formatLockInfoTable(arena, &.{}, false, 0));
