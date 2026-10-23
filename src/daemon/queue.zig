@@ -36,11 +36,14 @@ pub const Client = struct {
 pub const Lock = struct {
     holders: std.DoublyLinkedList = .{},
     waiters: std.DoublyLinkedList = .{},
-    /// How many clients may hold the lock at once.
-    capacity: usize = 1,
+    /// How many clients may hold the lock at once (`--slots`).
+    capacity: u32 = 1,
+    /// Length of `holders`, which would otherwise take a walk of the list to
+    /// count.
+    holder_count: u32 = 0,
 
     pub fn hasRoom(self: *const Lock) bool {
-        return self.holders.len() < self.capacity;
+        return self.holder_count < self.capacity;
     }
 
     /// A new request may skip the queue only if nobody is queued. Otherwise,
@@ -51,6 +54,7 @@ pub const Lock = struct {
 
     pub fn grant(self: *Lock, client: *Client, now: i64) void {
         self.holders.append(&client.node);
+        self.holder_count += 1;
         client.state = .holding;
         client.acquired_at = now;
     }
@@ -74,7 +78,10 @@ pub const Lock = struct {
     /// Takes the client out of whichever list it is in, if any.
     pub fn remove(self: *Lock, client: *Client) void {
         switch (client.state) {
-            .holding => self.holders.remove(&client.node),
+            .holding => {
+                self.holders.remove(&client.node);
+                self.holder_count -= 1;
+            },
             .waiting => self.waiters.remove(&client.node),
             .idle, .replaced => return,
         }
@@ -145,6 +152,7 @@ test "grantWaiters fills every free slot without skipping a waiter" {
     lock.grantWaiters(std.testing.io, 3);
     try std.testing.expectEqual(Client.State.holding, c.state);
     try std.testing.expectEqual(Client.State.holding, d.state);
+    try std.testing.expectEqual(@as(u32, 2), lock.holder_count);
     try std.testing.expectEqual(@as(usize, 2), lock.holders.len());
 }
 

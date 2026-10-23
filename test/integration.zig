@@ -137,7 +137,7 @@ test "list succeeds with no locks held" {
     defer daemon.stop(gpa, io);
 
     const cases = [_]struct { args: []const []const u8, expected: []const u8 }{
-        .{ .args = &.{"list"}, .expected = "NAME  PID  ELAPSED  WAITERS  CMD\n" },
+        .{ .args = &.{"list"}, .expected = "NAME  PID  ELAPSED  WAITERS  SLOTS  CMD\n" },
         .{ .args = &.{ "list", "-H" }, .expected = "" },
         .{ .args = &.{ "list", "-q" }, .expected = "" },
         .{ .args = &.{ "list", "--json" }, .expected = "" },
@@ -206,7 +206,7 @@ test "three different locks can be held at the same time and listed" {
     };
 
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
-    try expectFields(lines.next().?, &.{ "NAME", "PID", "ELAPSED", "WAITERS", "CMD" });
+    try expectFields(lines.next().?, &.{ "NAME", "PID", "ELAPSED", "WAITERS", "SLOTS", "CMD" });
     for (expected_rows) |row| {
         var pid_buf: [16]u8 = undefined;
         const pid = try std.fmt.bufPrint(&pid_buf, "{d}", .{row.pid});
@@ -216,7 +216,8 @@ test "three different locks can be held at the same time and listed" {
         try std.testing.expectEqualStrings(pid, fields.next().?);
         _ = fields.next().?; // ELAPSED depends on timing
         try std.testing.expectEqualStrings("0", fields.next().?);
-        // CMD is everything after WAITERS, spaces included.
+        try std.testing.expectEqualStrings("1/1", fields.next().?);
+        // CMD is everything after SLOTS, spaces included.
         try std.testing.expectEqualStrings("sh", fields.next().?);
         try std.testing.expect(std.mem.endsWith(u8, line, script));
     }
@@ -267,6 +268,7 @@ test "list --json reports waiters and round-trips the command" {
             name: []const u8,
             pid: i32,
             waiters: usize,
+            slots: u32,
             acquired_at: i64,
             command: []const u8,
         }, gpa, std.mem.trimEnd(u8, result.stdout, "\n"), .{});
@@ -280,6 +282,7 @@ test "list --json reports waiters and round-trips the command" {
         try std.testing.expectEqualStrings("mylock", info.name);
         try std.testing.expectEqual(holder.id.?, info.pid);
         try std.testing.expectEqual(1, info.waiters);
+        try std.testing.expectEqual(1, info.slots);
         try std.testing.expect(info.acquired_at <= before and info.acquired_at > before - 60);
         const expected_command = try std.fmt.allocPrint(gpa, "sh -c {s}", .{script});
         defer gpa.free(expected_command);
@@ -751,6 +754,163 @@ test "run rejects --coalesce with --replace" {
     try std.testing.expectEqual(Term{ .exited = @intFromEnum(nlock.SysExits.usage) }, result.term);
 }
 
+test "--slots lets that many clients hold the lock at once, and the next waits" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const go_path = try daemon.tmpPath(gpa, "go");
+    defer gpa.free(go_path);
+    defer daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" }) catch {};
+    const script = try std.fmt.allocPrint(gpa, "while [ ! -f {s} ]; do sleep 0.01; done", .{go_path});
+    defer gpa.free(script);
+
+    var client_a = try daemon.spawnClient(gpa, io, &.{ "run", "--slots", "2", "pool", "--", "sh", "-c", script });
+    var a_done = false;
+    defer if (!a_done) client_a.kill(io);
+    var client_b = try daemon.spawnClient(gpa, io, &.{ "run", "--slots", "2", "pool", "--", "sh", "-c", script });
+    var b_done = false;
+    defer if (!b_done) client_b.kill(io);
+    try waitForHolders(gpa, io, daemon, "pool", 2);
+
+    // Both slots are taken, so a third client queues.
+    const log_path = try daemon.tmpPath(gpa, "log");
+    defer gpa.free(log_path);
+    const script_c = try std.fmt.allocPrint(gpa, "echo c >> {s}", .{log_path});
+    defer gpa.free(script_c);
+    var client_c = try daemon.spawnClient(gpa, io, &.{ "run", "--slots", "2", "pool", "--", "sh", "-c", script_c });
+    var c_done = false;
+    defer if (!c_done) client_c.kill(io);
+    try waitForWaiters(gpa, io, daemon, "pool", 1);
+    try std.testing.expectError(error.FileNotFound, daemon.tmp.dir.readFileAlloc(io, "log", gpa, .limited(4096)));
+
+    // One row per holder, each showing both slots taken.
+    const result = try daemon.client(gpa, io, &.{ "list", "-H" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    var lines = std.mem.tokenizeScalar(u8, result.stdout, '\n');
+    for (0..2) |_| {
+        var fields = std.mem.tokenizeScalar(u8, lines.next().?, ' ');
+        try std.testing.expectEqualStrings("pool", fields.next().?);
+        _ = fields.next().?; // PID: either holder may have been granted first
+        _ = fields.next().?; // ELAPSED depends on timing
+        try std.testing.expectEqualStrings("1", fields.next().?);
+        try std.testing.expectEqualStrings("2/2", fields.next().?);
+    }
+    try std.testing.expectEqual(null, lines.next());
+
+    const quiet = try daemon.client(gpa, io, &.{ "list", "-q" });
+    defer gpa.free(quiet.stdout);
+    defer gpa.free(quiet.stderr);
+    try std.testing.expectEqualStrings("pool\n", quiet.stdout);
+
+    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
+    a_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_a.wait(io));
+    b_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_b.wait(io));
+    c_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try client_c.wait(io));
+    try expectFileContents(gpa, io, daemon.tmp.dir, "log", "c\n");
+}
+
+test "a request for a lock in use with a different --slots is rejected" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const go_path = try daemon.tmpPath(gpa, "go");
+    defer gpa.free(go_path);
+    defer daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" }) catch {};
+    const script = try std.fmt.allocPrint(gpa, "while [ ! -f {s} ]; do sleep 0.01; done", .{go_path});
+    defer gpa.free(script);
+
+    var holder = try daemon.spawnClient(gpa, io, &.{ "run", "--slots", "2", "pool", "--", "sh", "-c", script });
+    var holder_done = false;
+    defer if (!holder_done) holder.kill(io);
+    try waitForHolders(gpa, io, daemon, "pool", 1);
+
+    for ([_][]const []const u8{
+        &.{ "run", "pool", "--", "true" },
+        &.{ "run", "--slots", "3", "pool", "--", "true" },
+    }) |args| {
+        const result = try daemon.client(gpa, io, args);
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(Term{ .exited = 64 }, result.term);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, "'pool' is in use with --slots 2") != null);
+    }
+
+    // The same size takes the free slot without waiting.
+    const same = try daemon.client(gpa, io, &.{ "run", "-n", "--slots", "2", "pool", "--", "echo", "ran" });
+    defer gpa.free(same.stdout);
+    defer gpa.free(same.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, same.term);
+    try std.testing.expectEqualStrings("ran\n", same.stdout);
+
+    try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
+    holder_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try holder.wait(io));
+
+    // Once nobody uses the lock, it may be used with another size.
+    const resized = try daemon.client(gpa, io, &.{ "run", "--slots", "3", "pool", "--", "true" });
+    defer gpa.free(resized.stdout);
+    defer gpa.free(resized.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, resized.term);
+}
+
+test "daemon rejects zero slots sent directly to its socket" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const address = try std.Io.net.UnixAddress.init(daemon.socket_path);
+    const stream = try address.connect(io);
+    defer stream.close(io);
+    var read_buffer: [1024]u8 = undefined;
+    var reader = stream.reader(io, &read_buffer);
+    var write_buffer: [1024]u8 = undefined;
+    var writer = stream.writer(io, &write_buffer);
+
+    const request = try (protocol.LockRequest{ .acquire = .{
+        .name = "pool",
+        .nonblock = false,
+        .timeout = null,
+        .command = "true",
+        .slots = 0,
+    } }).toJson(gpa);
+    defer gpa.free(request);
+    try protocol.writeLine(&writer.interface, request);
+
+    // The daemon hangs up without queueing a request that could never be
+    // granted.
+    try std.testing.expectEqual(null, try reader.interface.takeDelimiter('\n'));
+
+    const result = try daemon.client(gpa, io, &.{ "list", "-q" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqualStrings("", result.stdout);
+}
+
+test "run rejects zero slots" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const result = try daemon.client(gpa, io, &.{ "run", "--slots", "0", "pool", "--", "true" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 64 }, result.term);
+}
+
 test "client fails when no daemon is running" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -844,6 +1004,32 @@ const HeldLock = struct {
         try std.testing.expectEqual(Term{ .exited = 0 }, try self.child.wait(io));
     }
 };
+
+/// Polls `nlock list --json` until lock `name` has exactly `expected`
+/// holders, or gives up after roughly five seconds.
+fn waitForHolders(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon, name: []const u8, expected: usize) !void {
+    var attempts: usize = 0;
+    while (attempts < 500) : (attempts += 1) {
+        const result = try daemon.client(gpa, io, &.{ "list", "--json" });
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        var holders: usize = 0;
+        var lines = std.mem.tokenizeScalar(u8, result.stdout, '\n');
+        while (lines.next()) |line| {
+            const parsed = try std.json.parseFromSlice(
+                struct { name: []const u8 },
+                gpa,
+                line,
+                .{ .ignore_unknown_fields = true },
+            );
+            defer parsed.deinit();
+            if (std.mem.eql(u8, name, parsed.value.name)) holders += 1;
+        }
+        if (holders == expected) return;
+        try io.sleep(.fromMilliseconds(10), .awake);
+    }
+    return error.HoldersNeverMatched;
+}
 
 /// Polls `nlock list --json` until lock `name` is held with exactly
 /// `expected` waiters, or gives up after roughly five seconds.

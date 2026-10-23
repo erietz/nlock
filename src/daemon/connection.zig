@@ -69,6 +69,10 @@ fn handleConnection(
         log(.err, "Received acquire request with an invalid lock name ({d} bytes)", .{req.name.len});
         return error.InvalidLockName;
     }
+    if (!protocol.isValidSlots(req.slots)) {
+        log(.err, "Received acquire request for lock '{s}' with no slots", .{req.name});
+        return error.InvalidSlots;
+    }
 
     // Borrows the command from `req_parsed`, which outlives it.
     var client: queue.Client = .{

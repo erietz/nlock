@@ -46,9 +46,21 @@ pub fn handleAcquireLockRequest(
             map.unlock();
             return err;
         };
-        entry.value_ptr.* = .{};
+        entry.value_ptr.* = .{ .capacity = lock_request.slots };
     }
     const lock = entry.value_ptr;
+
+    // Clients that disagree on the size of the lock would each limit the
+    // others differently, so only the size it is in use with is allowed.
+    if (lock.capacity != lock_request.slots) {
+        const capacity = lock.capacity;
+        map.unlock();
+        log(.info, "Lock '{s}' is in use with {d} slot(s), not {d}", .{ lock_request.name, capacity, lock_request.slots });
+        const mismatch_response = try (protocol.LockResponse{ .mismatch = .{ .slots = capacity } }).toJson(allocator);
+        defer allocator.free(mismatch_response);
+        try protocol.writeLine(writer, mismatch_response);
+        return false;
+    }
 
     if (lock.canGrantNow()) {
         lock.grant(client, nowSeconds(io));
@@ -96,7 +108,7 @@ pub fn handleAcquireLockRequest(
         // holder cannot change, but sent after releasing the mutex.
         const ahead = if (replace) 0 else lock.waiters.len();
         const queued_response = (protocol.LockResponse{ .queued = .{
-            .holder = lockInfo(lock_request.name, lock, ahead + 1),
+            .holder = lockInfo(lock_request.name, lock, lock.firstHolder(), ahead + 1),
             .ahead = ahead,
         } }).toJson(allocator) catch |err| {
             map.unlock();
@@ -212,14 +224,14 @@ fn nowSeconds(io: Io) i64 {
     return Io.Timestamp.now(io, .real).toSeconds();
 }
 
-/// Describes the lock by its longest-standing holder. Only valid while the
-/// map mutex is held.
-fn lockInfo(name: []const u8, lock: *const Lock, waiters: usize) protocol.LockInfo {
-    const holder = lock.firstHolder();
+/// Describes the lock and one of its holders, or no holder if null. Only
+/// valid while the map mutex is held.
+fn lockInfo(name: []const u8, lock: *const Lock, holder: ?*const Client, waiters: usize) protocol.LockInfo {
     return .{
         .name = name,
         .pid = if (holder) |h| h.pid else 0,
         .waiters = waiters,
+        .slots = lock.capacity,
         .acquired_at = if (holder) |h| h.acquired_at else 0,
         .command = if (holder) |h| h.command else "",
     };
@@ -245,11 +257,20 @@ pub fn handleListLocksRequest(
         var it = map.map.iterator();
         while (it.next()) |entry| {
             const lock = entry.value_ptr;
-            const line = try lockInfo(entry.key_ptr.*, lock, lock.waiters.len()).toJson(allocator);
-            lines.append(allocator, line) catch |err| {
-                allocator.free(line);
-                return err;
-            };
+            // TODO: Below traversal is O(n) for waiters, store the count in
+            // the lock itself. Same for holders. Probs less likely to be large
+            // number holders though?
+            const waiters = lock.waiters.len();
+            // One line per holder, longest-standing first.
+            var holder_node = lock.holders.first;
+            while (holder_node) |node| : (holder_node = node.next) {
+                const holder: *const Client = @fieldParentPtr("node", node);
+                const line = try lockInfo(entry.key_ptr.*, lock, holder, waiters).toJson(allocator);
+                lines.append(allocator, line) catch |err| {
+                    allocator.free(line);
+                    return err;
+                };
+            }
         }
     }
 

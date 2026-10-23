@@ -225,6 +225,17 @@ same job:
 Either way, an exit status of 0 means a run is scheduled, not that it
 succeeded. So don't chain them with `&&`.
 
+**Cap how many run at once.** `--slots 2` lets two commands hold the lock
+together; a third waits for one of them to finish. Useful for GPUs, parallel
+builds or rate-limited downloads, from any number of terminals or scripts:
+
+```bash
+nlock run --slots 2 gpu -- python train.py --config large.yaml
+```
+
+Every request for a lock in use must ask for the same number of slots. One that
+doesn't exits 64 without running.
+
 **See which locks are held, by which process, and who is waiting:**
 
 ```bash
@@ -232,9 +243,10 @@ watch -n 1 nlock list
 ```
 
 ```text
-NAME      PID  ELAPSED  WAITERS  CMD
-gpu      4121    12:41        2  python train.py --config large.yaml
-test-db  4377    00:08        1  npm test
+NAME      PID  ELAPSED  WAITERS  SLOTS  CMD
+gpu      4121    12:41        2    2/2  python train.py --config large.yaml
+gpu      4188    03:02        2    2/2  python train.py --config small.yaml
+test-db  4377    00:08        1    1/1  npm test
 ```
 
 **Find locks held for more than an hour:**
