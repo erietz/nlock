@@ -70,10 +70,7 @@ pub fn runServer(init: std.process.Init) !void {
     // tasks remain, so it is safe to walk the inner map without the mutex.
     defer {
         var it = map.map.iterator();
-        while (it.next()) |entry| {
-            gpa.free(entry.key_ptr.*);
-            gpa.free(entry.value_ptr.*.command);
-        }
+        while (it.next()) |entry| gpa.free(entry.key_ptr.*);
         map.deinit();
     }
 

@@ -24,6 +24,9 @@ pub const HELP = SYNOPSIS ++
     \\  -t, --timeout <secs>  wait at most <secs> seconds for the lock
     \\      --coalesce        exit 0 without running if a run is already pending
     \\      --replace         take the place of every client waiting for the lock
+    \\      --slots <n>       let up to <n> clients hold the lock at once
+    \\  -s, --shared          hold the lock alongside other shared holders
+    \\  -x, --exclusive       hold the lock alone (the default)
     \\
     \\List options:
     \\      --json            print one JSON object per lock
@@ -115,6 +118,9 @@ pub const RunOptions = struct {
     timeout: ?u64 = null,
     coalesce: bool = false,
     replace: bool = false,
+    /// How many clients may hold the lock at once.
+    slots: u32 = 1,
+    mode: protocol.Mode = .exclusive,
 
     /// Parses the arguments following `run`: `[options] <name> -- <command> [args...]`
     pub fn parseArgs(args: []const [:0]const u8) !RunOptions {
@@ -138,6 +144,8 @@ pub const RunOptions = struct {
             return error.InvalidArguments; // No command provided after "--"
         }
 
+        var shared = false;
+        var exclusive = false;
         var skip_next = false;
         for (args[0..double_dash_index], 0..) |arg, i| {
             if (skip_next) {
@@ -157,6 +165,18 @@ pub const RunOptions = struct {
                 };
                 options.timeout = timeout_value;
                 skip_next = true; // Skip the next argument since it's the value for --timeout
+            } else if (std.mem.eql(u8, arg, "--slots")) {
+                if (i + 1 >= double_dash_index) {
+                    return error.InvalidArguments; // No value provided for --slots
+                }
+                options.slots = std.fmt.parseInt(u32, args[i + 1], 10) catch {
+                    return error.InvalidArguments; // Invalid integer for --slots
+                };
+                skip_next = true;
+            } else if (std.mem.eql(u8, arg, "--shared") or std.mem.eql(u8, arg, "-s")) {
+                shared = true;
+            } else if (std.mem.eql(u8, arg, "--exclusive") or std.mem.eql(u8, arg, "-x")) {
+                exclusive = true;
             } else if (std.mem.eql(u8, arg, "--coalesce")) {
                 options.coalesce = true;
             } else if (std.mem.eql(u8, arg, "--replace")) {
@@ -176,6 +196,15 @@ pub const RunOptions = struct {
 
         if (options.coalesce and options.replace) {
             return error.InvalidArguments; // Conflicting flags
+        }
+
+        if (shared and exclusive) {
+            return error.InvalidArguments; // Conflicting flags
+        }
+        if (shared) options.mode = .shared;
+
+        if (!protocol.isValidSlots(options.slots, options.mode)) {
+            return error.InvalidArguments; // A lock nobody can hold, or a shared lock with several slots
         }
 
         return options;
@@ -323,7 +352,7 @@ test "RunOptions.parseArgs with name and command" {
 }
 
 test "RunOptions.parseArgs rejects unknown options rather than taking them as the name" {
-    for ([_][:0]const u8{ "--wide", "-x" }) |flag| {
+    for ([_][:0]const u8{ "--wide", "-z" }) |flag| {
         const before: []const [:0]const u8 = &.{ flag, "--", "echo", "Hello" };
         try std.testing.expectError(error.InvalidArguments, RunOptions.parseArgs(before));
         const after: []const [:0]const u8 = &.{ "mylock", flag, "--", "echo", "Hello" };
@@ -371,6 +400,50 @@ test "RunOptions.parseArgs with replace flag" {
     try std.testing.expectEqual(true, result.replace);
     const expected_command: []const [:0]const u8 = &.{ "echo", "Hello" };
     try std.testing.expectEqualDeep(expected_command, result.command);
+}
+
+test "RunOptions.parseArgs with slots" {
+    const args: []const [:0]const u8 = &.{ "--slots", "4", "mylock", "--", "make" };
+    const result = try RunOptions.parseArgs(args);
+    try std.testing.expectEqualStrings("mylock", result.name);
+    try std.testing.expectEqual(4, result.slots);
+
+    const default: []const [:0]const u8 = &.{ "mylock", "--", "make" };
+    try std.testing.expectEqual(1, (try RunOptions.parseArgs(default)).slots);
+}
+
+test "RunOptions.parseArgs rejects missing, zero and invalid slots" {
+    for ([_][]const [:0]const u8{
+        &.{ "mylock", "--slots", "--", "make" },
+        &.{ "--slots", "0", "mylock", "--", "make" },
+        &.{ "--slots", "-1", "mylock", "--", "make" },
+        &.{ "--slots", "two", "mylock", "--", "make" },
+        &.{ "--slots", "4294967296", "mylock", "--", "make" },
+    }) |args| {
+        try std.testing.expectError(error.InvalidArguments, RunOptions.parseArgs(args));
+    }
+}
+
+test "RunOptions.parseArgs with shared and exclusive flags" {
+    for ([_]struct { args: []const [:0]const u8, mode: protocol.Mode }{
+        .{ .args = &.{ "mylock", "--", "cat" }, .mode = .exclusive },
+        .{ .args = &.{ "-s", "mylock", "--", "cat" }, .mode = .shared },
+        .{ .args = &.{ "mylock", "--shared", "--", "cat" }, .mode = .shared },
+        .{ .args = &.{ "-x", "mylock", "--", "cat" }, .mode = .exclusive },
+        .{ .args = &.{ "--exclusive", "--slots", "4", "mylock", "--", "cat" }, .mode = .exclusive },
+        .{ .args = &.{ "--shared", "--slots", "1", "mylock", "--", "cat" }, .mode = .shared },
+    }) |case| {
+        try std.testing.expectEqual(case.mode, (try RunOptions.parseArgs(case.args)).mode);
+    }
+}
+
+test "RunOptions.parseArgs rejects --shared with --exclusive or several slots" {
+    for ([_][]const [:0]const u8{
+        &.{ "-s", "-x", "mylock", "--", "cat" },
+        &.{ "--shared", "--slots", "2", "mylock", "--", "cat" },
+    }) |args| {
+        try std.testing.expectError(error.InvalidArguments, RunOptions.parseArgs(args));
+    }
 }
 
 test "RunOptions.parseArgs with both coalesce and replace flags should error" {

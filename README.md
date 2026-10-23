@@ -93,6 +93,13 @@ arrival order. The lock is released when the command exits, including when it
 crashes or is killed. Locks are per user and cover everything you run: other
 terminals, tmux panes, cron jobs, editors and agents.
 
+**Take turns on a shared resource.** Start this from as many terminals as you
+like and the jobs queue up instead of competing for the GPU:
+
+```bash
+nlock run gpu -- python train.py --config large.yaml
+```
+
 **Skip a cron run if the previous one is still going:**
 
 ```cron
@@ -101,11 +108,35 @@ NLOCK_SOCKET=/run/user/1000/nlock.sock
 */15 * * * * nlock run -n backup -- restic backup ~/Documents
 ```
 
-**Take turns on a shared resource.** Start this from as many terminals as you
-like and the jobs queue up instead of competing for the GPU:
+**See which locks are held, by which process, and who is waiting:**
 
 ```bash
-nlock run gpu -- python train.py --config large.yaml
+watch -n 1 nlock list
+```
+
+<details>
+<summary>Scripts, waiting and exit status</summary>
+
+**Chain on the result.** `nlock run` exits with the command's exit status, so
+it works with `&&`, `||` and `set -e` like the command alone would:
+
+```bash
+nlock run build -- make -j8 && ./bin/app
+nlock run deploy -- ./deploy.sh || notify-send "deploy failed"
+```
+
+**Choose how long to wait:**
+
+```bash
+nlock run -n deploy -- ./deploy.sh       # exit 75 right away if a deploy is running
+nlock run -t 300 deploy -- ./deploy.sh   # exit 75 after 5 minutes without the lock
+```
+
+**Hold a lock by hand.** Open a shell under the lock, and anything else that
+takes `deploy` waits until you exit:
+
+```bash
+nlock run deploy -- "$SHELL"
 ```
 
 **Fan out the work and serialize the writes.** Eight downloads run at once,
@@ -116,33 +147,13 @@ seq 100 | xargs -P 8 -I{} sh -c \
   'curl -s https://jsonplaceholder.typicode.com/posts/{} | nlock run results -- tee -a results.jsonl > /dev/null'
 ```
 
-**Let parallel coding agents share one test database.** Put the command in
-`AGENTS.md` or `CLAUDE.md`, and agents in separate worktrees queue for the
-database instead of breaking each other's test runs:
+</details>
 
-```bash
-nlock run test-db -- npm test
-```
+<details>
+<summary>Naming locks after what they protect</summary>
 
-**Chain on the result.** `nlock run` exits with the command's exit status, so
-it works with `&&`, `||` and `set -e` like the command alone would:
-
-```bash
-nlock run build -- make -j8 && ./bin/app
-nlock run deploy -- ./deploy.sh || notify-send "deploy failed"
-```
-
-**Block a push when the tests fail.** Worktrees share one hooks directory, so
-pushes from parallel worktrees take turns running the suite. Save this as
-`.git/hooks/pre-push` and make it executable:
-
-```sh
-#!/bin/sh
-exec nlock run test-db -- npm test
-```
-
-**Use a path as the lock name.** A lock name can be any string, so naming a
-lock after the thing it protects keeps unrelated jobs from blocking each other:
+A lock name can be any string, so naming a lock after the thing it protects
+keeps unrelated jobs from blocking each other:
 
 ```bash
 # Builds in the same checkout take turns; separate worktrees build in parallel
@@ -159,19 +170,32 @@ nlock run ~/app/dev.db -- ./migrate.sh
 nlock run ~/app/dev.db -- ./import.sh data.csv
 ```
 
-**Hold a lock by hand.** Open a shell under the lock, and anything else that
-takes `deploy` waits until you exit:
+</details>
+
+<details>
+<summary>Coding agents and git worktrees</summary>
+
+**Let parallel coding agents share one test database.** Put the command in
+`AGENTS.md` or `CLAUDE.md`, and agents in separate worktrees queue for the
+database instead of breaking each other's test runs:
 
 ```bash
-nlock run deploy -- "$SHELL"
+nlock run test-db -- npm test
 ```
 
-**Choose how long to wait:**
+**Block a push when the tests fail.** Worktrees share one hooks directory, so
+pushes from parallel worktrees take turns running the suite. Save this as
+`.git/hooks/pre-push` and make it executable:
 
-```bash
-nlock run -n deploy -- ./deploy.sh       # exit 75 right away if a deploy is running
-nlock run -t 300 deploy -- ./deploy.sh   # exit 75 after 5 minutes without the lock
+```sh
+#!/bin/sh
+exec nlock run test-db -- npm test
 ```
+
+</details>
+
+<details>
+<summary>Collapsing bursts of triggers: <code>--coalesce</code> and <code>--replace</code></summary>
 
 **Rebuild on save without a backlog.** A file watcher can fire a dozen times
 during one build. `--coalesce` keeps at most one build waiting, and every extra
@@ -225,16 +249,47 @@ same job:
 Either way, an exit status of 0 means a run is scheduled, not that it
 succeeded. So don't chain them with `&&`.
 
-**See which locks are held, by which process, and who is waiting:**
+</details>
+
+<details>
+<summary>Sharing a lock: <code>--slots</code> and <code>--shared</code></summary>
+
+**Cap how many run at once.** `--slots 2` lets two commands hold the lock
+together; a third waits for one of them to finish. Useful for GPUs, parallel
+builds or rate-limited downloads, from any number of terminals or scripts:
 
 ```bash
-watch -n 1 nlock list
+nlock run --slots 2 gpu -- python train.py --config large.yaml
 ```
 
+Every request for a lock in use must ask for the same number of slots. One that
+doesn't exits 64 without running.
+
+**Let readers share, and writers go alone.** `-s` (`--shared`) holders run
+together; a plain (exclusive) request waits until they have all finished, and
+then runs alone. Unlike `flock -s`, a waiting writer is never starved: readers
+that arrive after it queue behind it.
+
+```bash
+nlock run -s app-db -- ./backup.sh     # these two run at the same time
+nlock run -s app-db -- ./report.sh
+nlock run app-db -- ./migrate.sh       # waits for both, then runs alone
+```
+
+</details>
+
+<details>
+<summary>Inspecting locks</summary>
+
+`nlock list` shows each holder, how long it has held the lock, and how many
+requests are waiting:
+
 ```text
-NAME      PID  ELAPSED  WAITERS  CMD
-gpu      4121    12:41        2  python train.py --config large.yaml
-test-db  4377    00:08        1  npm test
+NAME      PID  ELAPSED  WAITERS  MODE       SLOTS  CMD
+app-db   4410    01:20        1  shared         -  ./backup.sh
+app-db   4415    00:45        1  shared         -  ./report.sh
+gpu      4121    12:41        2  exclusive    2/2  python train.py --config large.yaml
+gpu      4188    03:02        2  exclusive    2/2  python train.py --config small.yaml
 ```
 
 **Find locks held for more than an hour:**
@@ -243,5 +298,7 @@ test-db  4377    00:08        1  npm test
 nlock list --json | jq -r --argjson now "$(date +%s)" \
   'select($now - .acquired_at > 3600) | "\(.name): pid \(.pid), \(.command)"'
 ```
+
+</details>
 
 See `man nlock` for every option.

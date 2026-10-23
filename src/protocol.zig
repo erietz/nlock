@@ -16,6 +16,15 @@ pub fn isValidLockName(name: []const u8) bool {
     return true;
 }
 
+test "isValidSlots" {
+    try std.testing.expect(!isValidSlots(0, .exclusive));
+    try std.testing.expect(isValidSlots(1, .exclusive));
+    try std.testing.expect(isValidSlots(std.math.maxInt(u32), .exclusive));
+    try std.testing.expect(!isValidSlots(0, .shared));
+    try std.testing.expect(isValidSlots(1, .shared));
+    try std.testing.expect(!isValidSlots(2, .shared));
+}
+
 test "isValidLockName" {
     try std.testing.expect(isValidLockName("build"));
     try std.testing.expect(isValidLockName("db-migrate.v2/prod"));
@@ -26,6 +35,22 @@ test "isValidLockName" {
     try std.testing.expect(isValidLockName("x" ** max_name_len));
     try std.testing.expect(!isValidLockName("x" ** (max_name_len + 1)));
 }
+
+/// Returns true if `slots` can be the size of a lock held in `mode`: at
+/// least one client must be able to hold it, or every request would wait
+/// forever, and a shared lock has a single slot that its holders share.
+pub fn isValidSlots(slots: u32, mode: Mode) bool {
+    return slots >= 1 and (mode == .exclusive or slots == 1);
+}
+
+/// How a client holds a lock.
+pub const Mode = enum {
+    /// Alone, or with up to `slots - 1` other exclusive holders.
+    exclusive,
+    /// Alongside any number of other shared holders, but no exclusive one.
+    /// Only for locks with one slot.
+    shared,
+};
 
 /// Longest command string the client sends, in bytes. The command is only
 /// shown to people, so the client truncates longer ones.
@@ -65,6 +90,11 @@ pub const LockRequest = union(enum) {
         /// What to do if the lock is held and other clients are already
         /// waiting for it.
         if_pending: IfPending = .queue,
+        /// How many clients may hold the lock at once. Every request for a
+        /// lock in use must ask for the same number.
+        slots: u32 = 1,
+        /// Shared requests must ask for one slot.
+        mode: Mode = .exclusive,
     };
 
     pub const IfPending = enum {
@@ -107,7 +137,7 @@ test "LockRequest.toJson serializes an acquire request correctly" {
         .timeout = null,
         .command = "echo Hello",
     } };
-    const expected = "{\"acquire\":{\"name\":\"mylock\",\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"if_pending\":\"queue\"}}";
+    const expected = "{\"acquire\":{\"name\":\"mylock\",\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"if_pending\":\"queue\",\"slots\":1,\"mode\":\"exclusive\"}}";
 
     const json = try request.toJson(allocator);
     defer allocator.free(json);
@@ -139,6 +169,8 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
         .timeout = 30,
         .command = "echo Hello",
         .if_pending = .replace,
+        .slots = 4,
+        .mode = .shared,
     };
 
     const json = try (LockRequest{ .acquire = original }).toJson(allocator);
@@ -153,6 +185,8 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
     try std.testing.expectEqual(original.timeout, acquire.timeout);
     try std.testing.expectEqualStrings(original.command, acquire.command);
     try std.testing.expectEqual(original.if_pending, acquire.if_pending);
+    try std.testing.expectEqual(original.slots, acquire.slots);
+    try std.testing.expectEqual(original.mode, acquire.mode);
 }
 
 test "LockRequest.fromJson correctly handles colon in command" {
@@ -189,15 +223,19 @@ test "LockRequest.fromJson rejects unknown fields and requests" {
     try std.testing.expectError(error.UnknownField, LockRequest.fromJson(unknown_request, std.testing.allocator));
 }
 
-/// One row of the `list` response: a lock currently held, and who holds it.
+/// One row of the `list` response: a lock currently held, and one of the
+/// clients holding it. A lock with several holders has one row for each.
 pub const LockInfo = struct {
     name: []const u8,
     /// Pid of the `nlock` client holding the lock, or 0 if unknown.
     pid: i32,
     /// Number of clients queued for the lock.
     waiters: usize,
-    /// When the current holder acquired the lock, in seconds since the Unix
-    /// epoch.
+    /// How many clients may hold the lock at once.
+    slots: u32 = 1,
+    /// How this holder holds the lock.
+    mode: Mode = .exclusive,
+    /// When this holder acquired the lock, in seconds since the Unix epoch.
     acquired_at: i64,
     command: []const u8,
 
@@ -239,6 +277,7 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
         .name = "mylock",
         .pid = 4242,
         .waiters = 2,
+        .slots = 4,
         .acquired_at = 1791331200,
         .command = "echo Hello",
     };
@@ -246,7 +285,7 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
     const json = try original.toJson(allocator);
     defer allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"name\":\"mylock\",\"pid\":4242,\"waiters\":2,\"acquired_at\":1791331200,\"command\":\"echo Hello\"}",
+        "{\"name\":\"mylock\",\"pid\":4242,\"waiters\":2,\"slots\":4,\"mode\":\"exclusive\",\"acquired_at\":1791331200,\"command\":\"echo Hello\"}",
         json,
     );
 
@@ -257,6 +296,7 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
     try std.testing.expectEqualStrings(original.name, info.name);
     try std.testing.expectEqual(original.pid, info.pid);
     try std.testing.expectEqual(original.waiters, info.waiters);
+    try std.testing.expectEqual(original.slots, info.slots);
     try std.testing.expectEqual(original.acquired_at, info.acquired_at);
     try std.testing.expectEqualStrings(original.command, info.command);
 }
@@ -277,9 +317,12 @@ pub const LockResponse = union(enum) {
     /// A queued request was taken out of the queue by a newer request with
     /// `if_pending = replace`. Sent instead of `ok`.
     replaced: Replaced,
+    /// The lock is in use with a different number of slots than the
+    /// request asked for, so it was not queued.
+    mismatch: Mismatch,
 
     pub const Queued = struct {
-        /// Who holds the lock.
+        /// The lock's longest-standing holder. Every slot is taken.
         holder: LockInfo,
         /// Number of clients queued ahead of this one.
         ahead: usize,
@@ -296,6 +339,11 @@ pub const LockResponse = union(enum) {
     pub const Replaced = struct {
         /// 0 if unknown.
         pid: i32,
+    };
+
+    pub const Mismatch = struct {
+        /// The number of slots the lock is in use with.
+        slots: u32,
     };
 
     /// A client waiting for a lock.
@@ -368,7 +416,7 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trips a queued response
     const json = try original.toJson(allocator);
     defer allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"queued\":{\"holder\":{\"name\":\"db\",\"pid\":4242,\"waiters\":3,\"acquired_at\":1791331200,\"command\":\"./migrate --up\"},\"ahead\":2}}",
+        "{\"queued\":{\"holder\":{\"name\":\"db\",\"pid\":4242,\"waiters\":3,\"slots\":1,\"mode\":\"exclusive\",\"acquired_at\":1791331200,\"command\":\"./migrate --up\"},\"ahead\":2}}",
         json,
     );
 
@@ -387,9 +435,11 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trips coalesced and rep
     for ([_]LockResponse{
         .{ .coalesced = .{ .pending = client, .waiters = 1 } },
         .{ .replaced = .{ .pid = 4321 } },
+        .{ .mismatch = .{ .slots = 4 } },
     }, [_][]const u8{
         "{\"coalesced\":{\"pending\":{\"pid\":4321,\"command\":\"make\"},\"waiters\":1}}",
         "{\"replaced\":{\"pid\":4321}}",
+        "{\"mismatch\":{\"slots\":4}}",
     }) |original, expected| {
         const json = try original.toJson(allocator);
         defer allocator.free(json);
