@@ -62,7 +62,7 @@ pub fn handleAcquireLockRequest(
         return false;
     }
 
-    if (lock.canGrantNow()) {
+    if (lock.canGrantNow(client.mode)) {
         lock.grant(client, nowSeconds(io));
         map.unlock();
 
@@ -232,6 +232,7 @@ fn lockInfo(name: []const u8, lock: *const Lock, holder: ?*const Client, waiters
         .pid = if (holder) |h| h.pid else 0,
         .waiters = waiters,
         .slots = lock.capacity,
+        .mode = if (holder) |h| h.mode else .exclusive,
         .acquired_at = if (holder) |h| h.acquired_at else 0,
         .command = if (holder) |h| h.command else "",
     };

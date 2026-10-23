@@ -69,8 +69,8 @@ fn handleConnection(
         log(.err, "Received acquire request with an invalid lock name ({d} bytes)", .{req.name.len});
         return error.InvalidLockName;
     }
-    if (!protocol.isValidSlots(req.slots)) {
-        log(.err, "Received acquire request for lock '{s}' with no slots", .{req.name});
+    if (!protocol.isValidSlots(req.slots, req.mode)) {
+        log(.err, "Received {t} acquire request for lock '{s}' with {d} slots", .{ req.mode, req.name, req.slots });
         return error.InvalidSlots;
     }
 
@@ -78,6 +78,7 @@ fn handleConnection(
     var client: queue.Client = .{
         .command = req.command,
         .pid = peer.pid,
+        .mode = req.mode,
     };
     // Whatever happens below, the client must not stay in the lock's queue
     // or holders once this connection ends. If it goes away while holding

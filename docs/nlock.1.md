@@ -3,7 +3,7 @@ title: NLOCK
 section: 1
 header: User Commands
 footer: nlock
-date: October 16, 2026
+date: October 23, 2026
 ---
 
 # NAME
@@ -12,7 +12,7 @@ nlock, nlockd - run commands while holding named locks
 
 # SYNOPSIS
 
-**nlock run** [**-n**] [**-t** *seconds*] [**\-\-coalesce** | **\-\-replace**] [**\-\-slots** *n*] *name* **\-\-** *command* [*args*...]
+**nlock run** [**-n**] [**-t** *seconds*] [**\-\-coalesce** | **\-\-replace**] [**\-\-slots** *n*] [**-s** | **-x**] *name* **\-\-** *command* [*args*...]
 
 **nlock list** [**\-\-json** | **-q**] [**-H**]
 
@@ -31,7 +31,8 @@ not start with **-**. While one **nlock run**
 holds a lock, any other **nlock run** for the same *name* waits until the lock
 is released, then runs its own command. Waiters are served in the order they
 arrived. A lock can instead be shared by up to *n* commands at once with
-**\-\-slots** *n*, which caps how many run in parallel.
+**\-\-slots** *n*, which caps how many run in parallel, or held **\-\-shared**
+by any number of readers while excluding writers.
 
 Locks are managed by the **nlockd** daemon, which must be running before
 **nlock** is used. **nlock** connects to it over a Unix domain socket (see
@@ -55,6 +56,8 @@ Locks are managed by the **nlockd** daemon, which must be running before
     For a lock with several slots, it describes the longest-standing holder:
 
         nlock: waiting for 'build' — all 4 slots held, longest by pid 4242 for 02:13: make (next in line)
+
+    and for a lock held shared, **held shared, longest by** *pid*.
 
     The elapsed time and queue position are as of when the request was
     queued. Nothing is printed when standard error is not a terminal, so
@@ -92,9 +95,13 @@ Locks are managed by the **nlockd** daemon, which must be running before
     **WAITERS**
     :   Number of clients queued for the lock.
 
+    **MODE**
+    :   **exclusive** or **shared**: how this holder holds the lock.
+
     **SLOTS**
     :   How many of the lock's slots are taken, out of how many, such as
-        **3/4**. A lock without **\-\-slots** shows **1/1**.
+        **3/4**. A lock without **\-\-slots** shows **1/1**, and shared
+        holders show **-**.
 
     **CMD**
     :   The command running under the lock. It is always the last column,
@@ -152,6 +159,21 @@ after **\-\-**, where it belongs to *command*.
     with status **64** without running *command*. Once nobody holds or waits
     for the lock, the next request may use a different *n*.
 
+**-s**, **\-\-shared**
+:   Hold the lock alongside any other shared holders, as a reader would.
+    Shared holders wait for an exclusive holder to finish, and an exclusive
+    request waits for every shared holder. Requests are still served in the
+    order they arrived: a shared request does not overtake an exclusive one
+    that is already waiting, even while the lock is held shared, so a steady
+    stream of readers cannot keep a writer waiting forever. Cannot be
+    combined with **\-\-slots** greater than **1**, and a lock in use with
+    several slots cannot be held shared (exit status **64**).
+
+**-x**, **\-\-exclusive**
+:   Hold the lock alone, or with up to *n* - 1 others under **\-\-slots**
+    *n*. This is the default; the option exists for compatibility with
+    **flock**(1). Cannot be combined with **\-\-shared**.
+
     Both options treat every request for the same *name* as the same job,
     whatever its command. Put anything that distinguishes jobs, such as a
     deploy target, in the name. When standard error is a terminal, a client
@@ -162,7 +184,7 @@ after **\-\-**, where it belongs to *command*.
 **\-\-json**
 :   Print one JSON object per holder, one per line, with the fields
     **name**, **pid**, **waiters**, **slots** (the lock's size, as given to
-    **\-\-slots**), **acquired_at** (seconds since the Unix epoch)
+    **\-\-slots**), **mode** (**exclusive** or **shared**), **acquired_at** (seconds since the Unix epoch)
     and **command**. Unlike the table, nothing is escaped, so prefer this
     format in scripts. **command** is the command's arguments joined with
     spaces, so quoting is lost, and is truncated like the CMD column.
@@ -289,7 +311,8 @@ told apart from **nlock** failing.
 **64** (EX_USAGE)
 :   The arguments are invalid. A short usage message is printed to standard
     error. Also used, with its own message, when the lock is in use with a
-    different **\-\-slots**.
+    different **\-\-slots**, or with several slots by a **\-\-shared**
+    request.
 
 **69** (EX_UNAVAILABLE)
 :   **nlockd** is not running, cannot be reached, or its socket belongs to
@@ -340,6 +363,13 @@ Deploy only the newest pushed revision, dropping any that are still waiting:
 Run at most four GPU jobs at a time, from any number of terminals:
 
     nlock run --slots 4 gpu -- python train.py
+
+Let backups and reports read the database together, while a migration waits
+for all of them and runs alone:
+
+    nlock run -s app-db -- ./backup.sh
+    nlock run -s app-db -- ./report.sh
+    nlock run app-db -- ./migrate.sh
 
 Run a shell pipeline under a lock:
 
