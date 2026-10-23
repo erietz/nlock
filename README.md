@@ -1,92 +1,48 @@
-nlock, nlockd - run commands while holding named locks
+<h1 align="center">nlock</h1>
 
-See [the man page](./docs/nlock.1.md) for the full documentation.
+<p align="center">
+  <b>Make commands take turns.</b><br>
+  Named locks for your shell: jobs from any terminal, script, cron job or
+  coding agent wait in line instead of colliding.
+</p>
 
-# Installation
+<p align="center">
+  <a href="https://github.com/erietz/nlock/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/erietz/nlock"></a>
+  <a href="./LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/erietz/nlock"></a>
+  <img alt="Platforms: macOS and Linux" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue">
+</p>
 
-## Homebrew
+<p align="center">
+  <img alt="Two terminals run nlock run gpu; the second waits until the first finishes, and nlock list shows the holder and one waiter" src="docs/demo/demo.gif" width="800">
+</p>
 
-```sh
-# install the tap and the formula
-brew tap erietz/tap
-brew install nlock
-
-# start the daemon automatically on login
-brew services start nlock
-```
-
-## Debian / Ubuntu
-
-Download the `.deb` package for your architecture from the
-[latest release](https://github.com/erietz/nlock/releases/latest) and install
-it with `apt`:
+## Quick start
 
 ```sh
-# x86_64 (amd64)
-sudo apt install ./nlock_<version>_amd64.deb
-
-# aarch64 (arm64)
-sudo apt install ./nlock_<version>_arm64.deb
+brew install erietz/tap/nlock && brew services start nlock
+nlock run gpu -- python train.py   # run this in two terminals: the second waits its turn
 ```
 
-After installation, enable and start the daemon as your user:
+Not on macOS? See [Installation](#installation) for Debian, Ubuntu, Arch and
+source builds.
 
-```sh
-systemctl --user daemon-reload
-systemctl --user enable --now nlockd
-```
+## Why not `flock`?
 
-## Arch Linux
+`flock` is a solid way to guard a file. `nlock` adds a small daemon that tracks
+every lock, so it can serve waiters in order and show who holds what.
 
-Download the `.pkg.tar.zst` package for your architecture from the
-[latest release](https://github.com/erietz/nlock/releases/latest) and install
-it with `pacman`:
+|                                                   | `flock`                | `nlock`                                 |
+|---------------------------------------------------|------------------------|-----------------------------------------|
+| Lock names                                        | a file path you manage | any string: `gpu`, `"$PWD"`, `/dev/ttyACM0` |
+| Waiters run in arrival order                      | no guarantee           | yes, first come first served            |
+| See who holds a lock and who is waiting           | no                     | `nlock list`, plus a message when you wait |
+| Let *n* commands run at once                      | no                     | `--slots n`                             |
+| Readers share, writers aren't starved             | readers can starve writers | `--shared`, writers keep their place |
+| Collapse a burst of triggers into one run         | no                     | `--coalesce`, `--replace`               |
 
-```sh
-# x86_64
-sudo pacman -U nlock-<version>-1-x86_64.pkg.tar.zst
+Full documentation is in [the man page](./docs/nlock.1.md) (`man nlock`).
 
-# aarch64
-sudo pacman -U nlock-<version>-1-aarch64.pkg.tar.zst
-```
-
-After installation, enable and start the daemon as your user:
-
-```sh
-systemctl --user daemon-reload
-systemctl --user enable --now nlockd
-```
-
-## From source (user installation)
-
-To install from source:
-
-1. Clone the repository:
-    ```bash
-    git clone https://github.com/erietz/nlock.git
-    cd nlock
-
-    # Trust the mise.toml file
-    mise trust
-    # Install the dependencies
-    mise install
-    # Build and install to ~/.local as the predefined prefix
-    mise run install
-    ```
-2. Start the nlockd service:
-    1. Linux:
-        ```bash
-        mise run daemon-systemd-user-start
-        ```
-    2. macOS:
-        ```bash
-        mise run daemon-launchd-user-start
-        ```
-
-If you do not have `mise` installed, view the commands in `./mise.toml` and run
-them manually.
-
-# Examples
+## Examples
 
 Every `nlock run` that uses the same lock name waits its turn and runs in
 arrival order. The lock is released when the command exits, including when it
@@ -300,5 +256,89 @@ nlock list --json | jq -r --argjson now "$(date +%s)" \
 ```
 
 </details>
+
+## Installation
+
+### Homebrew
+
+```sh
+# install the tap and the formula
+brew tap erietz/tap
+brew install nlock
+
+# start the daemon automatically on login
+brew services start nlock
+```
+
+### Debian / Ubuntu
+
+Download the `.deb` package for your architecture from the
+[latest release](https://github.com/erietz/nlock/releases/latest) and install
+it with `apt`:
+
+```sh
+# x86_64 (amd64)
+sudo apt install ./nlock_<version>_amd64.deb
+
+# aarch64 (arm64)
+sudo apt install ./nlock_<version>_arm64.deb
+```
+
+After installation, enable and start the daemon as your user:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now nlockd
+```
+
+### Arch Linux
+
+Download the `.pkg.tar.zst` package for your architecture from the
+[latest release](https://github.com/erietz/nlock/releases/latest) and install
+it with `pacman`:
+
+```sh
+# x86_64
+sudo pacman -U nlock-<version>-1-x86_64.pkg.tar.zst
+
+# aarch64
+sudo pacman -U nlock-<version>-1-aarch64.pkg.tar.zst
+```
+
+After installation, enable and start the daemon as your user:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now nlockd
+```
+
+### From source (user installation)
+
+To install from source:
+
+1. Clone the repository:
+    ```bash
+    git clone https://github.com/erietz/nlock.git
+    cd nlock
+
+    # Trust the mise.toml file
+    mise trust
+    # Install the dependencies
+    mise install
+    # Build and install to ~/.local as the predefined prefix
+    mise run install
+    ```
+2. Start the nlockd service:
+    1. Linux:
+        ```bash
+        mise run daemon-systemd-user-start
+        ```
+    2. macOS:
+        ```bash
+        mise run daemon-launchd-user-start
+        ```
+
+If you do not have `mise` installed, view the commands in `./mise.toml` and run
+them manually.
 
 See `man nlock` for every option.
