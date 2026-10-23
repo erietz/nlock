@@ -100,8 +100,12 @@ and each response is appended whole, never interleaved with another:
 
 ```bash
 seq 100 | xargs -P 8 -I{} sh -c \
-  'curl -s https://jsonplaceholder.typicode.com/posts/{} | nlock run results -- tee -a results.jsonl > /dev/null'
+  'curl -s "https://jsonplaceholder.typicode.com/photos?albumId={}" | nlock run results -- tee -a results.json > /dev/null'
 ```
+
+Each response is about 10 KB and arrives in pieces. Without `nlock`, pieces of
+different responses land in the middle of each other and `jq -s length
+results.json` fails to parse.
 
 </details>
 
