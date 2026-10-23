@@ -136,19 +136,18 @@ pub fn build(b: *std.Build) void {
         []const u8,
         "service-bindir",
         "Directory nlockd is run from by the installed service files (default: <prefix>/bin)",
-    ) orelse b.getInstallPath(.bin, "");
-    const service_files = b.addWriteFiles();
+    );
     switch (target.result.os.tag) {
         // $prefix/share/systemd/user is on systemd's user unit search path for
         // /usr, /usr/local and ~/.local alike.
         .linux => {
-            const unit = service_files.add("nlockd.service", fillTemplate(b, @embedFile("contrib/systemd/nlockd.service.in"), "@bindir@", service_bindir));
+            const unit = fillTemplate(b, b.path("contrib/systemd/nlockd.service.in"), service_bindir);
             b.getInstallStep().dependOn(&b.addInstallFileWithDir(unit, .prefix, "share/systemd/user/nlockd.service").step);
         },
         // Agents must live in ~/Library/LaunchAgents, which is outside the
         // prefix, so install the plist for the user to copy there.
         .macos => {
-            const plist = service_files.add("com.erietz.nlockd.plist", fillTemplate(b, @embedFile("contrib/launchd/com.erietz.nlockd.plist.in"), "@bindir@", service_bindir));
+            const plist = fillTemplate(b, b.path("contrib/launchd/com.erietz.nlockd.plist.in"), service_bindir);
             b.getInstallStep().dependOn(&b.addInstallFileWithDir(plist, .prefix, "share/nlock/launchd/com.erietz.nlockd.plist").step);
         },
         else => {},
@@ -180,9 +179,7 @@ pub fn build(b: *std.Build) void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
@@ -259,7 +256,20 @@ pub fn build(b: *std.Build) void {
     // and reading its source code will allow you to master it.
 }
 
-/// Replaces a placeholder such as `@bindir@` in a service file template.
-fn fillTemplate(b: *std.Build, template: []const u8, placeholder: []const u8, value: []const u8) []const u8 {
-    return std.mem.replaceOwned(u8, b.allocator, template, placeholder, value) catch @panic("OOM");
+/// Replaces `@bindir@` in a service file template with `bindir`, or with the
+/// install bin directory when null. The install prefix is only known once the
+/// build runs, so the substitution happens in a Run step rather than here.
+fn fillTemplate(b: *std.Build, template: std.Build.LazyPath, bindir: ?[]const u8) std.Build.LazyPath {
+    const sed = b.addSystemCommand(&.{ "sed", "-e" });
+    if (bindir) |dir| {
+        sed.addArg(b.fmt("s|@bindir@|{s}|g", .{dir}));
+    } else {
+        sed.addDirectoryArg2(.{ .relative = .{ .base = .install_bin } }, .{
+            .prefix = "s|@bindir@|",
+            .suffix = "|g",
+            .make_absolute = true,
+        });
+    }
+    sed.addFileArg(template);
+    return sed.captureStdOut(.{});
 }

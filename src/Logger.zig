@@ -32,7 +32,7 @@ fn enabled(level: Level, least_severe: ?Level) bool {
     const t = least_severe orelse return false;
     // NOTE: zig's enum values are 0->err, 1->warn, 2->info, 3->debug, so the
     // comparison is reversed.
-    return @intFromEnum(level) <= @intFromEnum(t);
+    return @backingInt(level) <= @backingInt(t);
 }
 
 pub fn log(comptime level: Level, comptime format: []const u8, args: anytype) void {

@@ -150,7 +150,7 @@ fn formatLockInfoTable(
         });
     }
 
-    var widths = [_]usize{0} ** columns.len;
+    var widths: [columns.len]usize = @splat(0);
     for (rows.items) |row| {
         for (row, &widths) |cell, *width| width.* = @max(width.*, cell.len);
     }
