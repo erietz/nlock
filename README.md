@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img alt="Two terminals run nlock run gpu; the second waits until the first finishes, and nlock list shows the holder and one waiter" src="docs/demo/demo.gif" width="800">
+  <img alt="Two terminals run nlock run gpu; the second waits until the first finishes, while nlock list shows the lock held with one waiter, then held with none, then free" src="docs/demo/demo.gif" width="800">
 </p>
 
 ## Quick start
