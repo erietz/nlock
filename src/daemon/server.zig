@@ -59,7 +59,7 @@ pub fn runServer(init: std.process.Init) !void {
     var server = try address.listen(io, .{});
     defer server.deinit(io);
 
-    const socket_path_z = try gpa.dupeZ(u8, socket_path);
+    const socket_path_z = try gpa.dupeSentinel(u8, socket_path, 0);
     defer gpa.free(socket_path_z);
     installShutdownHandlers(socket_path_z);
     log(.info, "nlockd version {s}", .{nlock.version()});

@@ -32,8 +32,8 @@ test "isValidLockName" {
     try std.testing.expect(!isValidLockName("a b"));
     try std.testing.expect(!isValidLockName("a\tb"));
     try std.testing.expect(!isValidLockName("a\nb"));
-    try std.testing.expect(isValidLockName("x" ** max_name_len));
-    try std.testing.expect(!isValidLockName("x" ** (max_name_len + 1)));
+    try std.testing.expect(isValidLockName(&@as([max_name_len]u8, @splat('x'))));
+    try std.testing.expect(!isValidLockName(&@as([max_name_len + 1]u8, @splat('x'))));
 }
 
 /// Returns true if `slots` can be the size of a lock held in `mode`: at

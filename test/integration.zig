@@ -327,7 +327,7 @@ test "daemon rejects invalid lock names sent directly to its socket" {
     defer daemon.stop(gpa, io);
 
     const address = try std.Io.net.UnixAddress.init(daemon.socket_path);
-    for ([_][]const u8{ "", "my lock", "a\nb", "x" ** (protocol.max_name_len + 1) }) |name| {
+    for ([_][]const u8{ "", "my lock", "a\nb", &@as([protocol.max_name_len + 1]u8, @splat('x')) }) |name| {
         const stream = try address.connect(io);
         defer stream.close(io);
         var read_buffer: [1024]u8 = undefined;
@@ -464,7 +464,7 @@ test "SIGTERM and SIGHUP reach the command, and the lock is held until it exits"
         const busy = try daemon.client(gpa, io, &.{ "run", "--nonblock", "mylock", "--", "true" });
         defer gpa.free(busy.stdout);
         defer gpa.free(busy.stderr);
-        try std.testing.expectEqual(Term{ .exited = @intFromEnum(nlock.SysExits.tempfail) }, busy.term);
+        try std.testing.expectEqual(Term{ .exited = @backingInt(nlock.SysExits.tempfail) }, busy.term);
 
         try daemon.tmp.dir.writeFile(io, .{ .sub_path = "go", .data = "" });
         holder_done = true;
@@ -706,8 +706,8 @@ test "long commands run, and are shown truncated" {
     // Together far longer than a message may be, so the command must be
     // truncated before it is sent. Several arguments, because Linux limits
     // a single one to 128 KiB.
-    const long_arg = "x" ** protocol.max_message_len;
-    const long_args = [_][]const u8{long_arg} ** 4;
+    const long_arg: [protocol.max_message_len]u8 = @splat('x');
+    const long_args: [4][]const u8 = @splat(&long_arg);
 
     const echo = try std.mem.concat(gpa, []const u8, &.{ &.{ "run", "mylock", "--", "echo" }, &long_args });
     defer gpa.free(echo);
@@ -754,7 +754,7 @@ test "run rejects --coalesce with --replace" {
     const result = try daemon.client(gpa, io, &.{ "run", "--coalesce", "--replace", "mylock", "--", "true" });
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
-    try std.testing.expectEqual(Term{ .exited = @intFromEnum(nlock.SysExits.usage) }, result.term);
+    try std.testing.expectEqual(Term{ .exited = @backingInt(nlock.SysExits.usage) }, result.term);
 }
 
 test "--slots lets that many clients hold the lock at once, and the next waits" {

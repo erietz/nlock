@@ -33,7 +33,7 @@ var forward_sig: std.atomic.Value(SigNum) = .init(0);
 /// of them sees the other's write and the command always gets the signal
 /// (occasionally twice).
 fn forwardSignal(sig: std.posix.SIG) callconv(.c) void {
-    forward_sig.store(@intFromEnum(sig), .seq_cst);
+    forward_sig.store(@backingInt(sig), .seq_cst);
     const pid = forward_pid.load(.seq_cst);
     if (pid > 0) _ = std.c.kill(pid, sig);
 }
@@ -83,7 +83,7 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
         forward_pid.store(pid, .seq_cst);
         // A signal that arrived while the command was starting.
         const sig = forward_sig.load(.seq_cst);
-        if (sig != 0) _ = std.c.kill(pid, @enumFromInt(sig));
+        if (sig != 0) _ = std.c.kill(pid, @fromBackingInt(@intCast(sig)));
     }
 
     const term = child.wait(io) catch |err| {
@@ -97,8 +97,8 @@ pub fn runCommand(io: Io, command: []const []const u8) u8 {
             return code;
         },
         .signal, .stopped => |sig| {
-            log(.debug, "Process ended by signal: {d}", .{@intFromEnum(sig)});
-            return 128 +| @as(u8, @intCast(@intFromEnum(sig)));
+            log(.debug, "Process ended by signal: {d}", .{@backingInt(sig)});
+            return 128 +| @as(u8, @intCast(@backingInt(sig)));
         },
         .unknown => |status| {
             log(.debug, "Process ended with unknown status: {d}", .{status});

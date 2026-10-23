@@ -21,6 +21,6 @@ pub const SysExits = enum(u8) {
     config = 78,
 
     pub fn exit(self: SysExits) noreturn {
-        std.process.exit(@intFromEnum(self));
+        std.process.exit(@backingInt(self));
     }
 };
