@@ -236,6 +236,17 @@ nlock run --slots 2 gpu -- python train.py --config large.yaml
 Every request for a lock in use must ask for the same number of slots. One that
 doesn't exits 64 without running.
 
+**Let readers share, and writers go alone.** `-s` (`--shared`) holders run
+together; a plain (exclusive) request waits until they have all finished, and
+then runs alone. Unlike `flock -s`, a waiting writer is never starved: readers
+that arrive after it queue behind it.
+
+```bash
+nlock run -s app-db -- ./backup.sh     # these two run at the same time
+nlock run -s app-db -- ./report.sh
+nlock run app-db -- ./migrate.sh       # waits for both, then runs alone
+```
+
 **See which locks are held, by which process, and who is waiting:**
 
 ```bash
@@ -243,10 +254,11 @@ watch -n 1 nlock list
 ```
 
 ```text
-NAME      PID  ELAPSED  WAITERS  SLOTS  CMD
-gpu      4121    12:41        2    2/2  python train.py --config large.yaml
-gpu      4188    03:02        2    2/2  python train.py --config small.yaml
-test-db  4377    00:08        1    1/1  npm test
+NAME      PID  ELAPSED  WAITERS  MODE       SLOTS  CMD
+app-db   4410    01:20        1  shared         -  ./backup.sh
+app-db   4415    00:45        1  shared         -  ./report.sh
+gpu      4121    12:41        2  exclusive    2/2  python train.py --config large.yaml
+gpu      4188    03:02        2  exclusive    2/2  python train.py --config small.yaml
 ```
 
 **Find locks held for more than an hour:**
