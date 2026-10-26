@@ -88,17 +88,17 @@ test "formatCommand joins arguments and truncates long commands" {
     defer allocator.free(short);
     try std.testing.expectEqualStrings("echo hello", short);
 
-    const exact = try formatCommand(allocator, &.{"x" ** protocol.max_command_len});
+    const exact = try formatCommand(allocator, &.{&@as([protocol.max_command_len]u8, @splat('x'))});
     defer allocator.free(exact);
     try std.testing.expectEqual(protocol.max_command_len, exact.len);
 
-    const long = try formatCommand(allocator, &.{ "echo", "x" ** (2 * protocol.max_command_len) });
+    const long = try formatCommand(allocator, &.{ "echo", &@as([2 * protocol.max_command_len]u8, @splat('x')) });
     defer allocator.free(long);
     try std.testing.expectEqual(protocol.max_command_len, long.len);
     try std.testing.expect(std.mem.endsWith(u8, long, "xx..."));
 
     // "é" is two bytes; a cut through the middle of one backs up before it.
-    const accents = try formatCommand(allocator, &.{"é" ** protocol.max_command_len});
+    const accents = try formatCommand(allocator, &.{std.mem.sliceAsBytes(&@as([protocol.max_command_len][2]u8, @splat("é".*)))});
     defer allocator.free(accents);
     try std.testing.expect(accents.len <= protocol.max_command_len);
     try std.testing.expect(std.unicode.utf8ValidateSlice(accents));
