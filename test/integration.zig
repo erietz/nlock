@@ -309,6 +309,8 @@ test "list --json reports waiters and round-trips the command" {
             mode: protocol.Mode,
             acquired_at: i64,
             command: []const u8,
+            rate: ?protocol.Rate,
+            rate_used: u32,
         }, gpa, std.mem.trimEnd(u8, result.stdout, "\n"), .{});
         defer parsed.deinit();
         const info = parsed.value;
@@ -326,6 +328,8 @@ test "list --json reports waiters and round-trips the command" {
         const expected_command = try std.fmt.allocPrint(gpa, "sh -c {s}", .{script});
         defer gpa.free(expected_command);
         try std.testing.expectEqualStrings(expected_command, info.command);
+        try std.testing.expectEqual(null, info.rate);
+        try std.testing.expectEqual(0, info.rate_used);
         break;
     }
 
@@ -961,7 +965,7 @@ test "a request for a lock in use with a different --slots is rejected" {
     try std.testing.expectEqual(Term{ .exited = 0 }, resized.term);
 }
 
-test "daemon rejects invalid slots sent directly to its socket" {
+test "daemon rejects invalid slots and rates sent directly to its socket" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
 
@@ -969,10 +973,14 @@ test "daemon rejects invalid slots sent directly to its socket" {
     defer daemon.stop(gpa, io);
 
     const address = try std.Io.net.UnixAddress.init(daemon.socket_path);
-    for ([_]struct { slots: u32, mode: protocol.Mode }{
+    for ([_]struct { slots: u32 = 1, mode: protocol.Mode = .exclusive, rate: ?protocol.Rate = null }{
         .{ .slots = 0, .mode = .exclusive },
         .{ .slots = 0, .mode = .shared },
         .{ .slots = 2, .mode = .shared },
+        .{ .rate = .{ .count = 0, .period_s = 60 } },
+        .{ .rate = .{ .count = 30, .period_s = 0 } },
+        .{ .rate = .{ .count = protocol.max_rate_count + 1, .period_s = 60 } },
+        .{ .rate = .{ .count = 30, .period_s = protocol.max_rate_period_s + 1 } },
     }) |case| {
         const stream = try address.connect(io);
         defer stream.close(io);
@@ -988,6 +996,7 @@ test "daemon rejects invalid slots sent directly to its socket" {
             .command = "true",
             .slots = case.slots,
             .mode = case.mode,
+            .rate = case.rate,
         } }).toJson(gpa);
         defer gpa.free(request);
         try protocol.writeLine(&writer.interface, request);

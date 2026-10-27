@@ -27,6 +27,7 @@ const RunLockedError = error{
     LockAcquireTimeout,
     LockReleaseFailed,
     LockSlotsMismatch,
+    LockRateLimited,
 };
 
 pub fn main(init: std.process.Init) void {
@@ -132,6 +133,7 @@ pub fn run(init: std.process.Init) !u8 {
             },
             // acquireLock has already said why.
             RunLockedError.LockSlotsMismatch => nlock.SysExits.usage.exit(),
+            RunLockedError.LockRateLimited => nlock.SysExits.tempfail.exit(),
             RunLockedError.LockReleaseFailed => {
                 printer.eprint(
                     "nlock: failed to release '{s}'; see the nlockd logs\n",
@@ -210,6 +212,9 @@ pub fn runLocked(ctx: Context, options: cli.RunOptions) !u8 {
         },
         protocol.LockResponseStatus.mismatch => {
             return RunLockedError.LockSlotsMismatch;
+        },
+        protocol.LockResponseStatus.rate_limited => {
+            return RunLockedError.LockRateLimited;
         },
         // A run is pending that will start after this request was made,
         // which is what the caller asked for, so this is success.
