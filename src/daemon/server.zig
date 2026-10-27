@@ -19,6 +19,15 @@ pub fn runServer(init: std.process.Init) !void {
     // Everything the daemon creates (lock file, socket) is for this user only.
     _ = std.c.umask(0o077);
 
+    // Every client holding or waiting for a lock keeps a connection, and so
+    // a file descriptor, open. Service managers start daemons with a low soft
+    // limit (1024 under systemd, 256 under launchd), past which new clients
+    // cannot connect, so raise it as far as the hard limit allows.
+    std.process.raiseFileDescriptorLimit();
+    if (std.posix.getrlimit(.NOFILE)) |limit| {
+        log(.info, "File descriptor limit: {d}", .{limit.cur});
+    } else |_| {}
+
     const socket_path = try nlock.paths.getSocketPath(gpa, init.environ_map);
     defer gpa.free(socket_path);
 

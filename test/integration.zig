@@ -83,6 +83,42 @@ test "multiple concurrent clients contending for the same lock all succeed" {
     }
 }
 
+test "daemon accepts more clients than the file descriptor limit it was started with" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    // Start the daemon with a low soft limit, as a service manager would.
+    // It inherits the limit; the test runner gets its own back at once.
+    const low_limit = 32;
+    const original = try std.posix.getrlimit(.NOFILE);
+    try std.posix.setrlimit(.NOFILE, .{ .cur = low_limit, .max = original.max });
+    const daemon = harness.Daemon.start(gpa, io) catch |err| {
+        std.posix.setrlimit(.NOFILE, original) catch {};
+        return err;
+    };
+    defer daemon.stop(gpa, io);
+    try std.posix.setrlimit(.NOFILE, original);
+
+    var holder = try HeldLock.start(gpa, io, daemon, "fds");
+    defer holder.finish(io) catch {};
+
+    // Each waiter keeps a connection open, so this many would not fit.
+    const waiter_count = low_limit + 16;
+    var waiters: [waiter_count]std.process.Child = undefined;
+    var spawned: usize = 0;
+    defer for (waiters[0..spawned]) |*waiter| waiter.kill(io);
+    while (spawned < waiter_count) : (spawned += 1) {
+        waiters[spawned] = try daemon.spawnClient(gpa, io, &.{ "run", "fds", "--", "true" });
+    }
+    try waitForWaiters(gpa, io, daemon, "fds", waiter_count);
+
+    try holder.finish(io);
+    for (waiters[0..spawned]) |*waiter| {
+        try std.testing.expectEqual(Term{ .exited = 0 }, try waiter.wait(io));
+    }
+    spawned = 0;
+}
+
 test "second client waits until the held lock is released" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
