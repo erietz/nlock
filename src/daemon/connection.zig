@@ -53,7 +53,7 @@ fn handleConnection(
     const req = switch (req_parsed.value) {
         .acquire => |acquire| acquire,
         .list => {
-            return locks.handleListLocksRequest(allocator, map, &writer.interface) catch |err| {
+            return locks.handleListLocksRequest(io, allocator, map, &writer.interface) catch |err| {
                 log(.err, "Failed to handle list locks request: {s}", .{@errorName(err)});
                 return err;
             };
@@ -79,6 +79,7 @@ fn handleConnection(
         .command = req.command,
         .pid = peer.pid,
         .mode = req.mode,
+        .socket = stream.socket.handle,
     };
     // Whatever happens below, the client must not stay in the lock's queue
     // or holders once this connection ends. If it goes away while holding

@@ -62,6 +62,10 @@ pub fn handleAcquireLockRequest(
         return false;
     }
 
+    // A waiter whose `nlock` has died would still count as a pending run
+    // (`--coalesce`) or as someone ahead in the queue.
+    lock.dropAbandonedTail(io);
+
     if (lock.canGrantNow(client.mode)) {
         lock.grant(client, nowSeconds(io));
         map.unlock();
@@ -169,6 +173,12 @@ pub fn handleAcquireLockRequest(
             try client.event.wait(io);
         }
 
+        if (client.state == .abandoned) {
+            // Nobody to tell: the socket's other end is closed.
+            log(.info, "Waiter for lock '{s}' went away (pid {d})", .{ lock_request.name, peer.pid });
+            return false;
+        }
+
         if (client.state == .replaced) {
             log(.info, "Waiter for lock '{s}' was replaced by pid {d}", .{ lock_request.name, client.replaced_by });
             const replaced_response = try (protocol.LockResponse{ .replaced = .{
@@ -239,6 +249,7 @@ fn lockInfo(name: []const u8, lock: *const Lock, holder: ?*const Client, waiters
 }
 
 pub fn handleListLocksRequest(
+    io: Io,
     allocator: std.mem.Allocator,
     map: *LockMap,
     writer: *Io.Writer,
@@ -255,9 +266,13 @@ pub fn handleListLocksRequest(
         map.lock();
         defer map.unlock();
 
+        const now = nowSeconds(io);
         var it = map.map.iterator();
         while (it.next()) |entry| {
             const lock = entry.value_ptr;
+            // Count only waiters that are still there. Never leaves the lock
+            // unused: waiters only queue behind a holder, and stay holders.
+            lock.dropAbandoned(io, now);
             // TODO: Below traversal is O(n) for waiters, store the count in
             // the lock itself. Same for holders. Probs less likely to be large
             // number holders though?
