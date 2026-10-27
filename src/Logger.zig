@@ -1,3 +1,5 @@
+//! Provides a simple logging utility that can be configured via the
+//! `NLOCK_LOG_LEVEL` environment variable.
 const std = @import("std");
 const Level = std.log.Level;
 
