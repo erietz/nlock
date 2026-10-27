@@ -51,7 +51,7 @@ fn handleConnection(
     // the client's command has finished, by `release`.
     const req_parsed = try readRequest(&reader.interface, allocator);
     defer req_parsed.deinit();
-    const req = switch (req_parsed.value()) {
+    const req = switch (req_parsed.value) {
         .acquire => |acquire| acquire,
         .list => {
             return locks.handleListLocksRequest(io, allocator, map, &writer.interface) catch |err| {
@@ -112,7 +112,7 @@ fn handleConnection(
     log(.debug, "Waiting for release lock request from client", .{});
     const release_req_parsed = try readRequest(&reader.interface, allocator);
     defer release_req_parsed.deinit();
-    switch (release_req_parsed.value()) {
+    switch (release_req_parsed.value) {
         // A connection may only release the lock it acquired, so the request
         // does not name one.
         .release => {
@@ -130,27 +130,11 @@ fn handleConnection(
     }
 }
 
-/// A request, and the message it was parsed from.
-const Request = struct {
-    parsed: std.json.Parsed(protocol.LockRequest),
-    /// Strings in `parsed` may point into it, so it lives as long.
-    message: []u8,
-    allocator: std.mem.Allocator,
-
-    fn value(self: Request) protocol.LockRequest {
-        return self.parsed.value;
-    }
-
-    fn deinit(self: Request) void {
-        self.parsed.deinit();
-        self.allocator.free(self.message);
-    }
-};
-
 /// Reads the next message, one line of up to `protocol.max_message_len`
 /// bytes, into memory of its own size, so the reader's buffer can be much
-/// smaller than the longest message.
-fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !Request {
+/// smaller than the longest message. The line is freed once parsed: the
+/// result copies every string out of it.
+fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !std.json.Parsed(protocol.LockRequest) {
     var line: Io.Writer.Allocating = .init(allocator);
     defer line.deinit();
     _ = reader.streamDelimiterLimit(&line.writer, '\n', .limited(protocol.max_message_len)) catch |err| switch (err) {
@@ -165,14 +149,9 @@ fn readRequest(reader: *Io.Reader, allocator: std.mem.Allocator) !Request {
         else => |e| return e,
     };
 
-    const message = try line.toOwnedSlice();
-    errdefer allocator.free(message);
+    const message = line.written();
     log(.debug, "Received lock request: {s}", .{message});
-    return .{
-        .parsed = try protocol.LockRequest.fromJson(message, allocator),
-        .message = message,
-        .allocator = allocator,
-    };
+    return protocol.LockRequest.fromJson(message, allocator);
 }
 
 test "readRequest reads messages much longer than the reader's buffer, one at a time" {
@@ -195,11 +174,11 @@ test "readRequest reads messages much longer than the reader's buffer, one at a 
 
     const first = try readRequest(&reader.interface, allocator);
     defer first.deinit();
-    try std.testing.expectEqualStrings(&command, first.value().acquire.command);
+    try std.testing.expectEqualStrings(&command, first.value.acquire.command);
 
     const second = try readRequest(&reader.interface, allocator);
     defer second.deinit();
-    try std.testing.expectEqual(.release, std.meta.activeTag(second.value()));
+    try std.testing.expectEqual(.release, std.meta.activeTag(second.value));
 
     try std.testing.expectError(error.EndOfStream, readRequest(&reader.interface, allocator));
 }
@@ -210,7 +189,7 @@ test "readRequest takes a last message without a newline, and rejects one that i
     var unterminated = std.Io.Reader.fixed("{\"list\":{}}");
     const list = try readRequest(&unterminated, allocator);
     defer list.deinit();
-    try std.testing.expectEqual(.list, std.meta.activeTag(list.value()));
+    try std.testing.expectEqual(.list, std.meta.activeTag(list.value));
 
     const too_long = try allocator.alloc(u8, protocol.max_message_len + 1);
     defer allocator.free(too_long);
@@ -232,7 +211,7 @@ test "readRequest parses a valid LockRequest where command contains newlines" {
     var reader = std.Io.Reader.fixed(message);
     const parsed = try readRequest(&reader, allocator);
     defer parsed.deinit();
-    const request = parsed.value().acquire;
+    const request = parsed.value.acquire;
 
     try std.testing.expectEqualStrings(expected_request.name, request.name);
     try std.testing.expectEqual(expected_request.nonblock, request.nonblock);
