@@ -48,6 +48,7 @@ test {
     _ = @import("queue.zig");
     _ = @import("connection.zig");
     _ = @import("locks.zig");
+    _ = @import("rate.zig");
     _ = server;
     _ = syslog;
 }
