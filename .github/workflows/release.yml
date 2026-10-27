@@ -1,42 +1,54 @@
 name: Release
 
+# Releases are driven by tags. The version bump lands on main through a normal
+# PR (`mise run release:prepare <version>`), then pushing the tag
+# (`mise run release:tag`) triggers this workflow. The workflow never writes to
+# git, so it works with branch protection and can be re-run for the same tag
+# if any step fails.
+
 on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
   workflow_dispatch:
     inputs:
-      version:
-        description: "Version to release (e.g. 0.1.0 or v0.1.0)"
+      tag:
+        description: "Tag to release (e.g. v0.1.0). Re-runs the release for an existing tag."
         required: true
         type: string
       dry_run:
-        description: "Dry run (build and package without pushing tag, release, or Homebrew update)"
+        description: "Dry run: build and package from the selected branch without requiring the tag or publishing anything"
         required: false
         default: false
         type: boolean
 
+# Only one release at a time so concurrent runs can't clobber release assets.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
+
+env:
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
 
 jobs:
   release:
     name: Build, Release & Update Homebrew
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Normalize version
         id: version
+        env:
+          RAW_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
         run: |
-          RAW_VERSION="${{ inputs.version }}"
           # Strip leading 'v' if present
-          VERSION="${RAW_VERSION#v}"
+          VERSION="${RAW_TAG#v}"
 
           # Validate semver pattern (e.g. 0.1.0 or 1.0.0-rc.1)
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
-            echo "::error::Invalid version format: '$RAW_VERSION'. Expected semantic version like '0.1.0' or '1.0.0'."
+            echo "::error::Invalid version format: '$RAW_TAG'. Expected semantic version like 'v0.1.0' or 'v1.0.0'."
             exit 1
           fi
 
@@ -45,38 +57,26 @@ jobs:
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "TAG=v${VERSION}" >> "$GITHUB_ENV"
 
-      - name: Update version in build.zig.zon
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # A dry run builds the branch the workflow was dispatched from, so a
+          # release PR can be checked before merging. Real releases build the tag.
+          ref: ${{ env.DRY_RUN == 'true' && github.ref || format('refs/tags/v{0}', steps.version.outputs.version) }}
+
+      - name: Verify release commit
         run: |
-          python3 -c '
-          import re, sys
-          version = sys.argv[1]
-          with open("build.zig.zon", "r") as f:
-              content = f.read()
-          new_content = re.sub(r"(\.version\s*=\s*\")[^\"]+(\")", rf"\g<1>{version}\g<2>", content)
-          with open("build.zig.zon", "w") as f:
-              f.write(new_content)
-          ' "${VERSION}"
-
-          echo "Updated build.zig.zon:"
-          git diff build.zig.zon
-
-      - name: Commit version bump and push tag
-        if: ${{ !inputs.dry_run }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add build.zig.zon
-          if ! git diff --staged --quiet; then
-            git commit -m "chore: release v${VERSION} [skip ci]"
-            git push origin HEAD:main
-          else
-            echo "build.zig.zon was already set to ${VERSION}"
+          ZON_VERSION="$(sed -n 's/.*\.version = "\(.*\)".*/\1/p' build.zig.zon)"
+          if [ "$ZON_VERSION" != "$VERSION" ]; then
+            echo "::error::build.zig.zon has version '${ZON_VERSION}' but the release is '${VERSION}'. Merge the version bump PR (mise run release:prepare ${VERSION}) before tagging."
+            exit 1
           fi
 
-          # Create and push annotated tag
-          git tag -a "${TAG}" -m "Release ${TAG}"
-          git push origin "${TAG}"
+          if [ "$DRY_RUN" != "true" ] && ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::${TAG} points at $(git rev-parse --short HEAD), which is not on main."
+            exit 1
+          fi
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -161,7 +161,7 @@ jobs:
           echo "linux_x86_64_sha=$(sha256sum nlock-linux-x86_64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        if: ${{ !inputs.dry_run }}
+        if: ${{ env.DRY_RUN != 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
@@ -176,7 +176,7 @@ jobs:
             dist/SHA256SUMS.txt
 
       - name: Update Homebrew formula in erietz/homebrew-tap
-        if: ${{ !inputs.dry_run }}
+        if: ${{ env.DRY_RUN != 'true' }}
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
