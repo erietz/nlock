@@ -276,9 +276,13 @@ test "LockRequest.fromJson rejects unknown fields and requests" {
 
 /// One row of the `list` response: a lock currently held, and one of the
 /// clients holding it. A lock with several holders has one row for each.
+/// A lock nobody holds has a single row with no holder (see `hasHolder`):
+/// its clients wait only for its rate limit, or it is idle but its rate
+/// limit still counts recent grants.
 pub const LockInfo = struct {
     name: []const u8,
-    /// Pid of the `nlock` client holding the lock, or 0 if unknown.
+    /// Pid of the `nlock` client holding the lock, or 0 if unknown or there
+    /// is no holder.
     pid: i32,
     /// Number of clients queued for the lock.
     waiters: usize,
@@ -286,13 +290,19 @@ pub const LockInfo = struct {
     slots: u32 = 1,
     /// How this holder holds the lock.
     mode: Mode = .exclusive,
-    /// When this holder acquired the lock, in seconds since the Unix epoch.
+    /// When this holder acquired the lock, in seconds since the Unix epoch,
+    /// or 0 if there is no holder.
     acquired_at: i64,
     command: []const u8,
     /// The lock's rate limit, if any.
     rate: ?Rate = null,
     /// How many times the lock was granted in the current window of `rate`.
     rate_used: u32 = 0,
+
+    /// False for the row of a lock nobody holds.
+    pub fn hasHolder(self: LockInfo) bool {
+        return self.acquired_at != 0;
+    }
 
     /// Serializes the LockInfo to a JSON string.
     /// Allocates memory for the JSON string, which must be freed by the caller.
@@ -380,7 +390,9 @@ pub const LockResponse = union(enum) {
     rate_limited: RateLimited,
 
     pub const Queued = struct {
-        /// The lock's longest-standing holder. Every slot is taken.
+        /// The lock's longest-standing holder: every slot is taken. Or, if
+        /// the lock has used up its rate limit, possibly none (pid 0, no
+        /// command).
         holder: LockInfo,
         /// Number of clients queued ahead of this one.
         ahead: usize,

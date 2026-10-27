@@ -301,6 +301,9 @@ test "formatRateLimitedMessage rounds the wait up" {
 /// `nlock: waiting for 'build' — all 4 slots held, longest by pid 4242 for 02:13: make (next in line)`
 /// and for a lock held shared:
 /// `nlock: waiting for 'db' — held shared, longest by pid 4242 for 02:13: ./backup.sh (next in line)`
+/// A lock that has used up its rate limit may have no holder at all, so then
+/// the limit is what is described:
+/// `nlock: waiting for 'api' — limit of 30/m reached (next in line)`
 fn formatQueuedMessage(
     allocator: std.mem.Allocator,
     holder: protocol.LockInfo,
@@ -310,16 +313,21 @@ fn formatQueuedMessage(
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(allocator, "nlock: waiting for '");
     try appendEscaped(allocator, &out, holder.name);
-    if (holder.slots > 1) {
-        try out.print(allocator, "' — all {d} slots held, longest", .{holder.slots});
-    } else if (holder.mode == .shared) {
-        try out.appendSlice(allocator, "' — held shared, longest");
+    const full_rate: ?protocol.Rate = if (holder.rate) |rate| (if (holder.rate_used >= rate.count) rate else null) else null;
+    if (full_rate) |rate| {
+        try out.print(allocator, "' — limit of {s} reached", .{try format.formatRate(allocator, rate)});
     } else {
-        try out.appendSlice(allocator, "' — held");
+        if (holder.slots > 1) {
+            try out.print(allocator, "' — all {d} slots held, longest", .{holder.slots});
+        } else if (holder.mode == .shared) {
+            try out.appendSlice(allocator, "' — held shared, longest");
+        } else {
+            try out.appendSlice(allocator, "' — held");
+        }
+        if (holder.pid > 0) try out.print(allocator, " by pid {d}", .{holder.pid});
+        try out.print(allocator, " for {s}: ", .{try formatElapsed(allocator, now - holder.acquired_at)});
+        try appendEscaped(allocator, &out, holder.command);
     }
-    if (holder.pid > 0) try out.print(allocator, " by pid {d}", .{holder.pid});
-    try out.print(allocator, " for {s}: ", .{try formatElapsed(allocator, now - holder.acquired_at)});
-    try appendEscaped(allocator, &out, holder.command);
     if (ahead == 0) {
         try out.appendSlice(allocator, " (next in line)\n");
     } else {
@@ -359,6 +367,29 @@ test "formatQueuedMessage" {
     try std.testing.expectEqualStrings(
         "nlock: waiting for 'db' — held shared, longest by pid 4242 for 02:13: ./migrate --up (2 ahead of you)\n",
         try formatQueuedMessage(arena, shared, 2, 1133),
+    );
+
+    // Its rate limit used up, a lock may wait with no holder at all.
+    const rate_limited: protocol.LockInfo = .{
+        .name = "api",
+        .pid = 0,
+        .waiters = 1,
+        .acquired_at = 0,
+        .command = "",
+        .rate = .{ .count = 30, .period_s = 60 },
+        .rate_used = 30,
+    };
+    try std.testing.expectEqualStrings(
+        "nlock: waiting for 'api' — limit of 30/m reached (next in line)\n",
+        try formatQueuedMessage(arena, rate_limited, 0, 1133),
+    );
+    // Within its limit, it waits for its holders as usual.
+    var within_rate = holder;
+    within_rate.rate = .{ .count = 30, .period_s = 60 };
+    within_rate.rate_used = 29;
+    try std.testing.expectEqualStrings(
+        "nlock: waiting for 'db' — held by pid 4242 for 02:13: ./migrate --up (next in line)\n",
+        try formatQueuedMessage(arena, within_rate, 0, 1133),
     );
 }
 

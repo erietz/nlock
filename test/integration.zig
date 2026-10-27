@@ -1154,6 +1154,172 @@ test "client fails when no daemon is running" {
     try std.testing.expectEqual(Term{ .exited = 69 }, result.term);
 }
 
+test "--rate grants the lock at most that many times per period" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    // One after another, so the lock is idle in between: its window must
+    // outlive its holders, or every run would start a fresh one.
+    var seconds: [3]f64 = undefined;
+    for (&seconds) |*s| {
+        const run = try timedClient(gpa, io, daemon, &.{ "run", "--rate", "2/1s", "api", "--", "true" });
+        defer gpa.free(run.result.stdout);
+        defer gpa.free(run.result.stderr);
+        try std.testing.expectEqual(Term{ .exited = 0 }, run.result.term);
+        s.* = run.seconds;
+    }
+    try std.testing.expect(seconds[0] < 0.5);
+    try std.testing.expect(seconds[1] < 0.5);
+    // The third waits until a second after the first. Upper bound is loose
+    // for slow machines.
+    try std.testing.expect(seconds[0] + seconds[1] + seconds[2] >= 0.9);
+    try std.testing.expect(seconds[2] < 3);
+}
+
+test "--rate with -n exits 75 and says when the next run is allowed" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const first = try daemon.client(gpa, io, &.{ "run", "--rate", "1/10s", "api", "--", "true" });
+    defer gpa.free(first.stdout);
+    defer gpa.free(first.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, first.term);
+
+    // There is a free slot; only the rate limit is in the way.
+    const second = try daemon.client(gpa, io, &.{ "run", "-n", "--rate", "1/10s", "api", "--", "true" });
+    defer gpa.free(second.stdout);
+    defer gpa.free(second.stderr);
+    try std.testing.expectEqual(Term{ .exited = 75 }, second.term);
+    try std.testing.expect(std.mem.indexOf(u8, second.stderr, "'api' has reached its limit of 1/10s; next run allowed in ") != null);
+}
+
+test "--rate with -t gives up once the timeout passes" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const first = try daemon.client(gpa, io, &.{ "run", "--rate", "1/10s", "api", "--", "true" });
+    defer gpa.free(first.stdout);
+    defer gpa.free(first.stderr);
+
+    const run = try timedClient(gpa, io, daemon, &.{ "run", "-t", "1", "--rate", "1/10s", "api", "--", "true" });
+    defer gpa.free(run.result.stdout);
+    defer gpa.free(run.result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 75 }, run.result.term);
+    try std.testing.expect(std.mem.indexOf(u8, run.result.stderr, "timed out") != null);
+    try std.testing.expect(run.seconds >= 0.9 and run.seconds < 5);
+}
+
+test "a lock in use rejects a different --rate, and an idle one takes it" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    var holder = try HeldLock.startWith(gpa, io, daemon, &.{ "--rate", "5/m" }, "api");
+    defer holder.finish(io) catch {};
+
+    for ([_]struct { args: []const []const u8, message: []const u8 }{
+        .{ .args = &.{ "run", "--rate", "10/m", "api", "--", "true" }, .message = "'api' is in use with --rate 5/m, not 10/m" },
+        .{ .args = &.{ "run", "api", "--", "true" }, .message = "'api' is in use with --rate 5/m\n" },
+    }) |case| {
+        const result = try daemon.client(gpa, io, case.args);
+        defer gpa.free(result.stdout);
+        defer gpa.free(result.stderr);
+        try std.testing.expectEqual(Term{ .exited = 64 }, result.term);
+        try std.testing.expect(std.mem.indexOf(u8, result.stderr, case.message) != null);
+    }
+
+    // Once nobody holds or waits for it, its rate limit can change.
+    try holder.finish(io);
+    const result = try daemon.client(gpa, io, &.{ "run", "--rate", "10/m", "api", "--", "true" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+}
+
+test "--coalesce while waiting for the rate limit runs the pending command once" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const log_path = try daemon.tmpPath(gpa, "log");
+    defer gpa.free(log_path);
+    const first = try daemon.client(gpa, io, &.{ "run", "--rate", "1/2s", "build", "--", "true" });
+    defer gpa.free(first.stdout);
+    defer gpa.free(first.stderr);
+
+    // Nobody holds the lock: only the rate limit makes these wait.
+    var runs: [2]std.process.Child = undefined;
+    var runs_done = [_]bool{ false, false };
+    defer for (&runs, runs_done) |*run, done| if (!done) run.kill(io);
+    for (&runs, [_][]const u8{ "first", "second" }) |*run, label| {
+        const script = try std.fmt.allocPrint(gpa, "echo {s} >> {s}", .{ label, log_path });
+        defer gpa.free(script);
+        run.* = try daemon.spawnClient(gpa, io, &.{ "run", "--coalesce", "--rate", "1/2s", "build", "--", "sh", "-c", script });
+        if (std.mem.eql(u8, label, "first")) try waitForWaiters(gpa, io, daemon, "build", 1);
+    }
+    for (&runs, &runs_done) |*run, *done| {
+        done.* = true;
+        try std.testing.expectEqual(Term{ .exited = 0 }, try run.wait(io));
+    }
+    try expectFileContents(gpa, io, daemon.tmp.dir, "log", "first\n");
+}
+
+test "a waiter killed while waiting for the rate limit does not hold up the next" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const first = try daemon.client(gpa, io, &.{ "run", "--rate", "1/2s", "api", "--", "true" });
+    defer gpa.free(first.stdout);
+    defer gpa.free(first.stderr);
+
+    // The front waiter keeps time for the rate limit. Once it is gone, the
+    // one behind it must still get its turn.
+    var front = try daemon.spawnClient(gpa, io, &.{ "run", "--rate", "1/2s", "api", "--", "true" });
+    try waitForWaiters(gpa, io, daemon, "api", 1);
+    var next = try daemon.spawnClient(gpa, io, &.{ "run", "--rate", "1/2s", "api", "--", "true" });
+    var next_done = false;
+    defer if (!next_done) next.kill(io);
+    try waitForWaiters(gpa, io, daemon, "api", 2);
+    front.kill(io);
+
+    next_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try next.wait(io));
+}
+
+/// A finished client run, and how long it took in seconds.
+const TimedRun = struct {
+    result: std.process.RunResult,
+    seconds: f64,
+};
+
+/// Runs `nlock` with `args` and times it. Caller owns `stdout` and `stderr`
+/// of the result.
+fn timedClient(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon, args: []const []const u8) !TimedRun {
+    const start = std.Io.Timestamp.now(io, .awake);
+    const result = try daemon.client(gpa, io, args);
+    const elapsed = start.durationTo(std.Io.Timestamp.now(io, .awake));
+    return .{
+        .result = result,
+        .seconds = @as(f64, @floatFromInt(elapsed.nanoseconds)) / std.time.ns_per_s,
+    };
+}
+
 fn expectFileContents(gpa: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, expected: []const u8) !void {
     const actual = try dir.readFileAlloc(io, sub_path, gpa, .limited(4096));
     defer gpa.free(actual);
@@ -1210,14 +1376,21 @@ const HeldLock = struct {
 
     /// Starts a client that holds `name`, and waits until it does.
     fn start(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon, name: []const u8) !HeldLock {
+        return startWith(gpa, io, daemon, &.{}, name);
+    }
+
+    /// Like `start`, with `options` for `nlock run`, e.g. `--rate`.
+    fn startWith(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon, options: []const []const u8, name: []const u8) !HeldLock {
         const go_path = try daemon.tmpPath(gpa, "go");
         defer gpa.free(go_path);
         const script = try std.fmt.allocPrint(gpa, "while [ ! -f {s} ]; do sleep 0.01; done", .{go_path});
         defer gpa.free(script);
 
-        var child = try daemon.spawnClient(gpa, io, &.{ "run", name, "--", "sh", "-c", script });
+        const args = try std.mem.concat(gpa, []const u8, &.{ &.{"run"}, options, &.{ name, "--", "sh", "-c", script } });
+        defer gpa.free(args);
+        var child = try daemon.spawnClient(gpa, io, args);
         errdefer child.kill(io);
-        try waitForWaiters(gpa, io, daemon, name, 0);
+        try waitForHolders(gpa, io, daemon, name, 1);
         return .{ .child = child, .daemon = daemon };
     }
 
@@ -1242,13 +1415,14 @@ fn waitForHolders(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon, n
         var lines = std.mem.tokenizeScalar(u8, result.stdout, '\n');
         while (lines.next()) |line| {
             const parsed = try std.json.parseFromSlice(
-                struct { name: []const u8 },
+                struct { name: []const u8, acquired_at: i64 },
                 gpa,
                 line,
                 .{ .ignore_unknown_fields = true },
             );
             defer parsed.deinit();
-            if (std.mem.eql(u8, name, parsed.value.name)) holders += 1;
+            // A lock nobody holds is listed with a row for no holder.
+            if (std.mem.eql(u8, name, parsed.value.name) and parsed.value.acquired_at != 0) holders += 1;
         }
         if (holders == expected) return;
         try io.sleep(.fromMilliseconds(10), .awake);
@@ -1256,7 +1430,7 @@ fn waitForHolders(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon, n
     return error.HoldersNeverMatched;
 }
 
-/// Polls `nlock list --json` until lock `name` is held with exactly
+/// Polls `nlock list --json` until lock `name` is listed with exactly
 /// `expected` waiters, or gives up after roughly five seconds.
 fn waitForWaiters(gpa: std.mem.Allocator, io: std.Io, daemon: *harness.Daemon, name: []const u8, expected: usize) !void {
     var attempts: usize = 0;
