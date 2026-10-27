@@ -707,6 +707,64 @@ test "--replace takes the place of every waiter, which exit 0 without running" {
     try expectFileContents(gpa, io, daemon.tmp.dir, "log", "v3\n");
 }
 
+test "--coalesce does not count a waiter that was killed as a pending run" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const log_path = try daemon.tmpPath(gpa, "log");
+    defer gpa.free(log_path);
+    var holder = try HeldLock.start(gpa, io, daemon, "build");
+    defer holder.finish(io) catch {};
+
+    const script_1 = try std.fmt.allocPrint(gpa, "echo first >> {s}", .{log_path});
+    defer gpa.free(script_1);
+    var first = try daemon.spawnClient(gpa, io, &.{ "run", "--coalesce", "build", "--", "sh", "-c", script_1 });
+    try waitForWaiters(gpa, io, daemon, "build", 1);
+    // Reaped once this returns, so its socket is closed. No `list` from here
+    // on until the next request has been decided: `list` drops dead waiters
+    // too, and would hide whether the request did.
+    first.kill(io);
+
+    const script_2 = try std.fmt.allocPrint(gpa, "echo second >> {s}", .{log_path});
+    defer gpa.free(script_2);
+    var second = try daemon.spawnClient(gpa, io, &.{ "run", "--coalesce", "build", "--", "sh", "-c", script_2 });
+    var second_done = false;
+    defer if (!second_done) second.kill(io);
+    try waitForWaiters(gpa, io, daemon, "build", 1);
+
+    try holder.finish(io);
+    second_done = true;
+    try std.testing.expectEqual(Term{ .exited = 0 }, try second.wait(io));
+    try expectFileContents(gpa, io, daemon.tmp.dir, "log", "second\n");
+}
+
+test "list does not count waiters that were killed" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    var holder = try HeldLock.start(gpa, io, daemon, "db");
+    defer holder.finish(io) catch {};
+
+    var waiters: [2]std.process.Child = undefined;
+    // One waits with a timeout and one without, since the daemon waits for
+    // them differently.
+    for (&waiters, [_][]const []const u8{ &.{ "-t", "30" }, &.{} }, 1..) |*waiter, options, count| {
+        const args = try std.mem.concat(gpa, []const u8, &.{ &.{"run"}, options, &.{ "db", "--", "true" } });
+        defer gpa.free(args);
+        waiter.* = try daemon.spawnClient(gpa, io, args);
+        try waitForWaiters(gpa, io, daemon, "db", count);
+    }
+    for (&waiters) |*waiter| waiter.kill(io);
+
+    try waitForWaiters(gpa, io, daemon, "db", 0);
+}
+
 test "a huge --timeout waits normally instead of crashing the daemon" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
