@@ -12,7 +12,7 @@ nlock, nlockd - run commands while holding named locks
 
 # SYNOPSIS
 
-**nlock run** [**-n**] [**-t** *seconds*] [**\-\-coalesce** | **\-\-replace**] [**\-\-slots** *n*] [**-s** | **-x**] *name* **\-\-** *command* [*args*...]
+**nlock run** [**-n**] [**-t** *seconds*] [**\-\-coalesce** | **\-\-replace**] [**\-\-slots** *n*] [**\-\-rate** *n*/*per*] [**-s** | **-x**] *name* **\-\-** *command* [*args*...]
 
 **nlock list** [**\-\-json** | **-q**] [**-H**]
 
@@ -32,7 +32,9 @@ holds a lock, any other **nlock run** for the same *name* waits until the lock
 is released, then runs its own command. Waiters are served in the order they
 arrived. A lock can instead be shared by up to *n* commands at once with
 **\-\-slots** *n*, which caps how many run in parallel, or held **\-\-shared**
-by any number of readers while excluding writers.
+by any number of readers while excluding writers. With **\-\-rate**, a lock
+is also granted at most a given number of times per period, which keeps
+commands that call a rate-limited service, such as an API, within its limit.
 
 Locks are managed by the **nlockd** daemon, which must be running before
 **nlock** is used. **nlock** connects to it over a Unix domain socket (see
@@ -57,7 +59,11 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
         nlock: waiting for 'build' — all 4 slots held, longest by pid 4242 for 02:13: make (next in line)
 
-    and for a lock held shared, **held shared, longest by** *pid*.
+    and for a lock held shared, **held shared, longest by** *pid*. If the
+    lock has used up its **\-\-rate** limit, it says so instead, as the
+    lock may have no holder at all:
+
+        nlock: waiting for 'api' — limit of 30/m reached (next in line)
 
     The elapsed time and queue position are as of when the request was
     queued. Nothing is printed when standard error is not a terminal, so
@@ -74,10 +80,13 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
 **list** [**\-\-json** | **-q**] [**-H**]
 :   Print the locks currently held, one line per holder, sorted by name and
-    then by how long each holder has held the lock, longest first. By default
-    the output is whitespace-aligned columns with a header row. When no
-    locks are held, only the header row is printed, and **list** still exits
-    **0**. The columns are:
+    then by how long each holder has held the lock, longest first. A lock
+    with a **\-\-rate** limit is listed even while nobody holds it, as long
+    as its clients wait for the limit or it still counts recent runs; it then
+    has a single line, with **-** for the holder's PID, ELAPSED, MODE and
+    CMD. By default the output is whitespace-aligned columns with a header
+    row. When no locks are listed, only the header row is printed, and
+    **list** still exits **0**. The columns are:
 
     **NAME**
     :   The lock name.
@@ -103,6 +112,15 @@ Locks are managed by the **nlockd** daemon, which must be running before
         **3/4**. A lock without **\-\-slots** shows **1/1**, and shared
         holders show **-**.
 
+    **RATE**
+    :   The lock's **\-\-rate** limit, written as that option takes it, such
+        as **30/m**, or **-** if it has none. Shown only if some lock has a
+        rate limit.
+
+    **USED**
+    :   How many times the lock was granted in the last period of its rate
+        limit, or **-** if it has none. Shown along with **RATE**.
+
     **CMD**
     :   The command running under the lock. It is always the last column,
         since it is the only one that may contain spaces; every other column
@@ -127,12 +145,14 @@ after **\-\-**, where it belongs to *command*.
 
 **-n**, **\-\-nonblock**
 :   Do not wait. If the lock is already held, exit immediately with an error
-    instead of queueing.
+    instead of queueing. If only its **\-\-rate** limit is in the way, the
+    error says how long until the next run is allowed.
 
 **-t**, **\-\-timeout** *seconds*
 :   Wait at most *seconds* (a non-negative integer) for the lock. If the lock
     is not acquired in time, exit with an error without running the command.
-    Without this option, **nlock** waits indefinitely.
+    Without this option, **nlock** waits indefinitely. Time spent with the
+    machine asleep counts.
 
 **\-\-coalesce**
 :   If other clients are already waiting for the lock, exit **0** at once
@@ -159,6 +179,27 @@ after **\-\-**, where it belongs to *command*.
     with status **64** without running *command*. Once nobody holds or waits
     for the lock, the next request may use a different *n*.
 
+**\-\-rate** *n*/*per*
+:   Grant the lock at most *n* times in any period of *per*, counting when
+    each command starts, not how long it runs. *per* is a unit, **s**,
+    **m** (or **min**), **h** or **d**, optionally preceded by how many of
+    it: **30/m**, **5000/h** and **3/10s** are all valid. *n* may be up to
+    10000 and *per* up to a day. A request that would go over the limit
+    waits until the oldest run counted falls out of the period, in the order
+    requests arrived; **\-\-nonblock**, **\-\-timeout**, **\-\-coalesce**
+    and **\-\-replace** apply as usual. Combined with **\-\-slots** or
+    **\-\-shared**, a command needs both a free slot and room under the
+    limit.
+
+    The lock counts its recent runs even while nobody holds it, so running
+    commands one after another cannot get around the limit. As with
+    **\-\-slots**, every request for a lock in use must give the same
+    **\-\-rate**, or none if it has none (exit status **64** otherwise).
+    Once nobody holds or waits for the lock, the next request may change or
+    drop the limit; the runs already counted still count towards a new one.
+    Like all lock state, the count is kept only in memory, so it starts over
+    when **nlockd** restarts.
+
 **-s**, **\-\-shared**
 :   Hold the lock alongside any other shared holders, as a reader would.
     Shared holders wait for an exclusive holder to finish, and an exclusive
@@ -184,15 +225,19 @@ after **\-\-**, where it belongs to *command*.
 **\-\-json**
 :   Print one JSON object per holder, one per line, with the fields
     **name**, **pid**, **waiters**, **slots** (the lock's size, as given to
-    **\-\-slots**), **mode** (**exclusive** or **shared**), **acquired_at** (seconds since the Unix epoch)
-    and **command**. Unlike the table, nothing is escaped, so prefer this
+    **\-\-slots**), **mode** (**exclusive** or **shared**), **acquired_at** (seconds since the Unix epoch),
+    **command**, **rate** (the **\-\-rate** limit as **count** and
+    **period_s**, or **null**) and **rate_used** (like the USED column). A
+    lock nobody holds has **pid** and **acquired_at** **0** and an empty
+    **command**. Unlike the table, nothing is escaped, so prefer this
     format in scripts. **command** is the command's arguments joined with
     spaces, so quoting is lost, and is truncated like the CMD column.
     Cannot be combined with **-q**.
 
 **-q**, **\-\-quiet**
 :   Print only lock names, one per line. A lock with several holders is
-    printed once.
+    printed once. Like the table, this includes rate-limited locks nobody
+    holds.
 
 **-H**, **\-\-no-header**
 :   Omit the header row from the default output.
@@ -311,8 +356,8 @@ told apart from **nlock** failing.
 **64** (EX_USAGE)
 :   The arguments are invalid. A short usage message is printed to standard
     error. Also used, with its own message, when the lock is in use with a
-    different **\-\-slots**, or with several slots by a **\-\-shared**
-    request.
+    different **\-\-slots** or **\-\-rate**, or with several slots by a
+    **\-\-shared** request.
 
 **69** (EX_UNAVAILABLE)
 :   **nlockd** is not running, cannot be reached, or its socket belongs to
@@ -331,8 +376,9 @@ told apart from **nlock** failing.
     because it is too long.
 
 **75** (EX_TEMPFAIL)
-:   The lock is busy and **\-\-nonblock** was given, or the **\-\-timeout**
-    expired before the lock was acquired. Retrying later may succeed.
+:   The lock is busy, or has reached its **\-\-rate** limit, and
+    **\-\-nonblock** was given, or the **\-\-timeout** expired before the
+    lock was acquired. Retrying later may succeed.
 
 **nlock list**, **nlock \-\-help** and **nlock \-\-version** exit **0** on success.
 
@@ -364,6 +410,15 @@ Run at most four GPU jobs at a time, from any number of terminals:
 
     nlock run --slots 4 gpu -- python train.py
 
+Stay within an API's limit of 5000 requests an hour, however many scripts
+make them:
+
+    nlock run --rate 5000/h github-api -- gh api /repos/erietz/nlock
+
+Fail at once instead of waiting when the limit is reached:
+
+    nlock run -n --rate 30/m api -- ./sync.sh || echo "try again later"
+
 Let backups and reports read the database together, while a migration waits
 for all of them and runs alone:
 
@@ -381,7 +436,7 @@ Show the locks that have clients queued for them:
 
 Check whether a lock is currently held:
 
-    nlock list -q | grep -qx build && echo "build is locked"
+    nlock list --json | jq -e 'select(.name == "build" and .acquired_at != 0)' >/dev/null && echo "build is locked"
 
 Print the command running under each lock:
 
