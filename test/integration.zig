@@ -1302,6 +1302,26 @@ test "a waiter killed while waiting for the rate limit does not hold up the next
     try std.testing.expectEqual(Term{ .exited = 0 }, try next.wait(io));
 }
 
+test "list shows a rate-limited lock nobody holds, and how much of its limit is used" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    const daemon = try harness.Daemon.start(gpa, io);
+    defer daemon.stop(gpa, io);
+
+    const run = try daemon.client(gpa, io, &.{ "run", "--rate", "3/m", "api", "--", "true" });
+    defer gpa.free(run.stdout);
+    defer gpa.free(run.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, run.term);
+
+    // Nobody holds it, but it still counts that run against its limit.
+    const result = try daemon.client(gpa, io, &.{ "list", "-H" });
+    defer gpa.free(result.stdout);
+    defer gpa.free(result.stderr);
+    try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
+    try expectFields(std.mem.trimEnd(u8, result.stdout, "\n"), &.{ "api", "-", "-", "0", "-", "0/1", "3/m", "1", "-" });
+}
+
 /// A finished client run, and how long it took in seconds.
 const TimedRun = struct {
     result: std.process.RunResult,
