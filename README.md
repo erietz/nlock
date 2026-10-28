@@ -232,7 +232,7 @@ runs, so a script that calls the API in a loop can't get around it:
 
 ```bash
 for repo in $(cat repos.txt); do
-  nlock run --rate 5000/h github-api -- gh api "repos/$repo" >> repos.jsonl
+  nlock run --rate 5000/h github-api -- gh api "repos/$repo" --jq . >> repos.jsonl
 done
 ```
 
