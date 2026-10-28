@@ -226,7 +226,7 @@ pub const RunOptions = struct {
 /// or `min`, `h`, `d`) optionally preceded by how many of it, e.g. `30/m`,
 /// `3/10s`. Returns null if it is malformed or outside the allowed range.
 fn parseRate(text: []const u8) ?protocol.Rate {
-    const slash = std.mem.indexOfScalar(u8, text, '/') orelse return null;
+    const slash = std.mem.findScalar(u8, text, '/') orelse return null;
     const count = std.fmt.parseInt(u32, text[0..slash], 10) catch return null;
 
     const per = text[slash + 1 ..];
@@ -271,9 +271,9 @@ test "parseRate" {
 
 test "parseRate rejects malformed and out-of-range rates" {
     for ([_][]const u8{
-        "",       "30",      "/m",      "30/",     "30/x",       "30/ms",
-        "30/m/s", "-1/m",    "x/m",     "30/-1m",  "30/1.5m",    "30/ m",
-        "0/m",    "30/0s",   "10001/h", "1/2d",    "1/86401s",   "1/4294967296s",
+        "",               "30",    "/m",      "30/",    "30/x",     "30/ms",
+        "30/m/s",         "-1/m",  "x/m",     "30/-1m", "30/1.5m",  "30/ m",
+        "0/m",            "30/0s", "10001/h", "1/2d",   "1/86401s", "1/4294967296s",
         "1/99999999999d",
     }) |text| {
         if (parseRate(text)) |rate| {

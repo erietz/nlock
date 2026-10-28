@@ -162,14 +162,31 @@ pub fn handleAcquireLockRequest(
         const deadline: ?i64 = if (timeout_s) |t| now.mono_ns + @as(i64, @intCast(t)) * std.time.ns_per_s else null;
         log(.debug, "Waiting for lock '{s}' (timeout: {?d}s)", .{ lock_request.name, timeout_s });
 
-        // Wait until `grantWaiters` hands the lock to this client, or it is
-        // replaced or abandoned, or the timeout expires. A holder leaving
-        // wakes it. So does the rate limit, if any, while it is at the front
-        // of the queue: then it waits until the limit allows the next grant,
-        // and grants it itself, as no holder leaving would.
+        // Wait for this client's turn.
+        //
+        // From here on, this connection does not decide what happens to the
+        // client: other connections do, by changing `client.state` under the
+        // mutex and then calling `client.event.set` to wake it:
+        //
+        //   .holding    `grantWaiters` gave it the lock, usually called by
+        //               the holder's connection as it releases.
+        //   .replaced   a newer `--replace` request took its place in the
+        //               queue.
+        //   .abandoned  someone noticed its `nlock` process is gone.
+        //
+        // Waking up does not mean any of these happened. It may also be the
+        // timeout, the rate limit's window opening, or `grantWaiters` saying
+        // "only the rate limit is in the way, wait for it". So every wake-up
+        // goes round the loop and checks `client.state` again, the usual
+        // pattern for a condition variable.
+        //
+        // The mutex is held at the top of every pass and while checking
+        // `client.state`, and released only while asleep.
         map.lock();
         while (client.state == .waiting) {
             const t = clockNow(io);
+
+            // 1. Give up if the client's `--timeout` has passed.
             if (deadline) |d| if (t.mono_ns >= d) {
                 log(.info, "Timeout while waiting for lock '{s}' to be released", .{lock_request.name});
                 leaveLocked(io, allocator, map, lock_request.name, client);
@@ -180,27 +197,50 @@ pub fn handleAcquireLockRequest(
                 return false;
             };
 
-            // A waiter keeps its lock in the map. Looked up again each time,
-            // as other connections may have moved it since.
+            // 2. Try to grant the lock. Usually a holder leaving does this
+            // for us, but when only the rate limit keeps the front waiter
+            // out, no holder has to leave, so nobody else would. Once the
+            // window opens, the front waiter grants itself here.
+            //
+            // A waiter keeps its lock in the map, so the lookup cannot fail.
+            // It is looked up again each pass, not kept from before: while
+            // the mutex was released, other connections may have added locks
+            // and grown the map, moving this `Lock` to a new address.
             const waited_for = map.map.getPtr(lock_request.name).?;
             waited_for.grantWaiters(io, t);
             if (client.state != .waiting) break;
 
+            // 3. Decide when to wake up on our own, if nobody wakes us
+            // first: at the timeout, or when the rate limit allows the next
+            // grant (only if this client is at the front and only the limit
+            // keeps it out), whichever is sooner. If neither applies,
+            // `wake_at` is null and only another connection can wake us.
             var wake_at = deadline;
             if (waited_for.rateWakeAt(client, t)) |ready| wake_at = @min(wake_at orelse ready, ready);
-            // Under the mutex, as every `set` is, so no wake-up is lost.
+
+            // 4. Sleep. The reset must come before `map.unlock`: every `set`
+            // is done under the mutex, so one that arrives after we unlock
+            // also arrives after the reset, and is not lost. Resetting after
+            // unlocking would leave a gap where a grant's `set` is wiped
+            // out, and we would sleep through our turn.
             client.event.reset();
             map.unlock();
             const timeout: Io.Timeout = if (wake_at) |w| .{
                 .deadline = .{ .clock = .boot, .raw = .{ .nanoseconds = w } },
             } else .none;
             client.event.waitTimeout(io, timeout) catch |err| switch (err) {
+                // Reaching `wake_at` is not an error. The checks at the top
+                // of the loop work out whether it was the deadline or the
+                // rate limit.
                 error.Timeout => {},
                 else => return err,
             };
             map.lock();
         }
         map.unlock();
+
+        // `client.state` is no longer `.waiting`: it was granted the lock,
+        // replaced, or abandoned.
 
         if (client.state == .abandoned) {
             // Nobody to tell: the socket's other end is closed.
