@@ -120,6 +120,10 @@ run = "zig build test-integration"
 [tasks."test"]
 depends = ["test:unit", "test:integration"]
 
+[tasks."test:e2e"]
+description = "Drive nlock in real terminals with vhs and tmux (requires both)"
+run = "test/e2e/run.sh"
+
 [tasks."test:tmux"]
 depends = "test"
 env.COMMAND = "sh -c 'echo testing && sleep 3'"

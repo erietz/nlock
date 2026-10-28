@@ -25,7 +25,9 @@ pub const HELP = SYNOPSIS ++
     \\      --coalesce        exit 0 without running if a run is already pending
     \\      --replace         take the place of every client waiting for the lock
     \\      --slots <n>       let up to <n> clients hold the lock at once
-    \\  -s, --shared          hold the lock alongside other shared holders
+    \\      --rate <n>/<per>  grant the lock at most <n> times per <per>,
+    \\                        e.g. 30/m, 5000/h, 3/10s (units s, m, h, d)
+    \\  -s, --shared         hold the lock alongside other shared holders
     \\  -x, --exclusive       hold the lock alone (the default)
     \\
     \\List options:
@@ -121,6 +123,7 @@ pub const RunOptions = struct {
     /// How many clients may hold the lock at once.
     slots: u32 = 1,
     mode: protocol.Mode = .exclusive,
+    rate: ?protocol.Rate = null,
 
     /// Parses the arguments following `run`: `[options] <name> -- <command> [args...]`
     pub fn parseArgs(args: []const [:0]const u8) !RunOptions {
@@ -173,6 +176,14 @@ pub const RunOptions = struct {
                     return error.InvalidArguments; // Invalid integer for --slots
                 };
                 skip_next = true;
+            } else if (std.mem.eql(u8, arg, "--rate")) {
+                if (i + 1 >= double_dash_index) {
+                    return error.InvalidArguments; // No value provided for --rate
+                }
+                options.rate = parseRate(args[i + 1]) orelse {
+                    return error.InvalidArguments; // Not <n>/<per>, or out of range
+                };
+                skip_next = true;
             } else if (std.mem.eql(u8, arg, "--shared") or std.mem.eql(u8, arg, "-s")) {
                 shared = true;
             } else if (std.mem.eql(u8, arg, "--exclusive") or std.mem.eql(u8, arg, "-x")) {
@@ -210,6 +221,85 @@ pub const RunOptions = struct {
         return options;
     }
 };
+
+/// Parses a `--rate` value: `<n>/<per>`, where `<per>` is a unit (`s`, `m`
+/// or `min`, `h`, `d`) optionally preceded by how many of it, e.g. `30/m`,
+/// `3/10s`. Returns null if it is malformed or outside the allowed range.
+fn parseRate(text: []const u8) ?protocol.Rate {
+    const slash = std.mem.findScalar(u8, text, '/') orelse return null;
+    const count = std.fmt.parseInt(u32, text[0..slash], 10) catch return null;
+
+    const per = text[slash + 1 ..];
+    const digits = for (per, 0..) |ch, i| {
+        if (!std.ascii.isDigit(ch)) break i;
+    } else per.len;
+    const amount: u32 = if (digits == 0) 1 else std.fmt.parseInt(u32, per[0..digits], 10) catch return null;
+    const unit = per[digits..];
+    const unit_s: u32 = if (std.mem.eql(u8, unit, "s"))
+        1
+    else if (std.mem.eql(u8, unit, "m") or std.mem.eql(u8, unit, "min"))
+        std.time.s_per_min
+    else if (std.mem.eql(u8, unit, "h"))
+        std.time.s_per_hour
+    else if (std.mem.eql(u8, unit, "d"))
+        std.time.s_per_day
+    else
+        return null;
+
+    const period_s = std.math.mul(u32, amount, unit_s) catch return null;
+    const rate: protocol.Rate = .{ .count = count, .period_s = period_s };
+    return if (protocol.isValidRate(rate)) rate else null;
+}
+
+test "parseRate" {
+    const cases = [_]struct { text: []const u8, count: u32, period_s: u32 }{
+        .{ .text = "30/m", .count = 30, .period_s = 60 },
+        .{ .text = "30/min", .count = 30, .period_s = 60 },
+        .{ .text = "10/s", .count = 10, .period_s = 1 },
+        .{ .text = "5000/h", .count = 5000, .period_s = 3600 },
+        .{ .text = "1/d", .count = 1, .period_s = 86400 },
+        .{ .text = "3/10s", .count = 3, .period_s = 10 },
+        .{ .text = "100/15m", .count = 100, .period_s = 900 },
+        .{ .text = "100/1h", .count = 100, .period_s = 3600 },
+    };
+    for (cases) |case| {
+        const rate = parseRate(case.text) orelse return error.TestUnexpectedNull;
+        try std.testing.expectEqual(case.count, rate.count);
+        try std.testing.expectEqual(case.period_s, rate.period_s);
+    }
+}
+
+test "parseRate rejects malformed and out-of-range rates" {
+    for ([_][]const u8{
+        "",               "30",    "/m",      "30/",    "30/x",     "30/ms",
+        "30/m/s",         "-1/m",  "x/m",     "30/-1m", "30/1.5m",  "30/ m",
+        "0/m",            "30/0s", "10001/h", "1/2d",   "1/86401s", "1/4294967296s",
+        "1/99999999999d",
+    }) |text| {
+        if (parseRate(text)) |rate| {
+            std.debug.print("accepted {s} as {d}/{d}s\n", .{ text, rate.count, rate.period_s });
+            return error.TestExpectedNull;
+        }
+    }
+}
+
+test "RunOptions.parseArgs with rate" {
+    const args: []const [:0]const u8 = &.{ "--rate", "30/m", "mylock", "--", "make" };
+    const rate = (try RunOptions.parseArgs(args)).rate.?;
+    try std.testing.expectEqual(30, rate.count);
+    try std.testing.expectEqual(60, rate.period_s);
+
+    const default: []const [:0]const u8 = &.{ "mylock", "--", "make" };
+    try std.testing.expectEqual(null, (try RunOptions.parseArgs(default)).rate);
+
+    for ([_][]const [:0]const u8{
+        &.{ "mylock", "--rate", "--", "make" },
+        &.{ "--rate", "0/m", "mylock", "--", "make" },
+        &.{ "--rate", "fast", "mylock", "--", "make" },
+    }) |bad| {
+        try std.testing.expectError(error.InvalidArguments, RunOptions.parseArgs(bad));
+    }
+}
 
 test "Command.parseArgs with empty arguments" {
     const args: []const [:0]const u8 = &.{};

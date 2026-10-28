@@ -74,6 +74,10 @@ fn handleConnection(
         log(.err, "Received {t} acquire request for lock '{s}' with {d} slots", .{ req.mode, req.name, req.slots });
         return error.InvalidSlots;
     }
+    if (req.rate) |rate| if (!protocol.isValidRate(rate)) {
+        log(.err, "Received acquire request for lock '{s}' with a rate of {d} per {d}s", .{ req.name, rate.count, rate.period_s });
+        return error.InvalidRate;
+    };
 
     // Borrows the command from `req_parsed`, which outlives it.
     var client: queue.Client = .{

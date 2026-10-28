@@ -216,7 +216,7 @@ succeeded. So don't chain them with `&&`.
 
 **Cap how many run at once.** `--slots 2` lets two commands hold the lock
 together; a third waits for one of them to finish. Useful for GPUs, parallel
-builds or rate-limited downloads, from any number of terminals or scripts:
+builds or downloads, from any number of terminals or scripts:
 
 ```bash
 nlock run --slots 2 gpu -- python train.py --config large.yaml
@@ -224,6 +224,22 @@ nlock run --slots 2 gpu -- python train.py --config large.yaml
 
 Every request for a lock in use must ask for the same number of slots. One that
 doesn't exits 64 without running.
+
+**Stay under an API's rate limit.** `--rate 5000/h` starts at most 5000
+commands in any hour; the next one waits until the oldest falls out of the
+window. It counts starts, not how long commands run, and keeps counting between
+runs, so a script that calls the API in a loop can't get around it:
+
+```bash
+for repo in $(cat repos.txt); do
+  nlock run --rate 5000/h github-api -- gh api "repos/$repo" >> repos.jsonl
+done
+```
+
+Units are `s`, `m`, `h` and `d`, as in `30/m` or `3/10s`. With `-n`, a request
+over the limit exits 75 and says when the next run is allowed. `--rate` combines
+with `--slots` to cap both how often and how many at once, and `nlock list`
+shows each limit and how much of it is used.
 
 **Let readers share, and writers go alone.** `-s` (`--shared`) holders run
 together; a plain (exclusive) request waits until they have all finished, and

@@ -43,6 +43,52 @@ pub fn isValidSlots(slots: u32, mode: Mode) bool {
     return slots >= 1 and (mode == .exclusive or slots == 1);
 }
 
+/// A lock's rate limit (`--rate`): it is granted at most `count` times in
+/// any window of `period_s` seconds.
+pub const Rate = struct {
+    count: u32,
+    period_s: u32,
+
+    pub fn eql(a: ?Rate, b: ?Rate) bool {
+        const x = a orelse return b == null;
+        const y = b orelse return false;
+        return x.count == y.count and x.period_s == y.period_s;
+    }
+};
+
+/// Most grants a rate limit may allow per window. The daemon remembers the
+/// time of each, so this bounds its memory per lock.
+pub const max_rate_count = 10_000;
+
+/// Longest window a rate limit may use, in seconds.
+pub const max_rate_period_s = std.time.s_per_day;
+
+/// Returns true if `rate` can be a lock's rate limit. The client checks it
+/// before sending it and the daemon checks it again.
+pub fn isValidRate(rate: Rate) bool {
+    return rate.count >= 1 and rate.count <= max_rate_count and
+        rate.period_s >= 1 and rate.period_s <= max_rate_period_s;
+}
+
+test "isValidRate" {
+    try std.testing.expect(isValidRate(.{ .count = 1, .period_s = 1 }));
+    try std.testing.expect(isValidRate(.{ .count = max_rate_count, .period_s = max_rate_period_s }));
+    try std.testing.expect(!isValidRate(.{ .count = 0, .period_s = 60 }));
+    try std.testing.expect(!isValidRate(.{ .count = max_rate_count + 1, .period_s = 60 }));
+    try std.testing.expect(!isValidRate(.{ .count = 30, .period_s = 0 }));
+    try std.testing.expect(!isValidRate(.{ .count = 30, .period_s = max_rate_period_s + 1 }));
+}
+
+test "Rate.eql" {
+    const a: Rate = .{ .count = 30, .period_s = 60 };
+    try std.testing.expect(Rate.eql(null, null));
+    try std.testing.expect(Rate.eql(a, a));
+    try std.testing.expect(!Rate.eql(a, null));
+    try std.testing.expect(!Rate.eql(null, a));
+    try std.testing.expect(!Rate.eql(a, .{ .count = 30, .period_s = 1 }));
+    try std.testing.expect(!Rate.eql(a, .{ .count = 1, .period_s = 60 }));
+}
+
 /// How a client holds a lock.
 pub const Mode = enum {
     /// Alone, or with up to `slots - 1` other exclusive holders.
@@ -95,6 +141,9 @@ pub const LockRequest = union(enum) {
         slots: u32 = 1,
         /// Shared requests must ask for one slot.
         mode: Mode = .exclusive,
+        /// The lock's rate limit, if any. Like `slots`, every request for a
+        /// lock in use must ask for the same one.
+        rate: ?Rate = null,
     };
 
     pub const IfPending = enum {
@@ -137,7 +186,7 @@ test "LockRequest.toJson serializes an acquire request correctly" {
         .timeout = null,
         .command = "echo Hello",
     } };
-    const expected = "{\"acquire\":{\"name\":\"mylock\",\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"if_pending\":\"queue\",\"slots\":1,\"mode\":\"exclusive\"}}";
+    const expected = "{\"acquire\":{\"name\":\"mylock\",\"nonblock\":false,\"timeout\":null,\"command\":\"echo Hello\",\"if_pending\":\"queue\",\"slots\":1,\"mode\":\"exclusive\",\"rate\":null}}";
 
     const json = try request.toJson(allocator);
     defer allocator.free(json);
@@ -171,6 +220,7 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
         .if_pending = .replace,
         .slots = 4,
         .mode = .shared,
+        .rate = .{ .count = 30, .period_s = 60 },
     };
 
     const json = try (LockRequest{ .acquire = original }).toJson(allocator);
@@ -187,6 +237,7 @@ test "LockRequest.fromJson(LockRequest.toJson()) round-trip works correctly" {
     try std.testing.expectEqual(original.if_pending, acquire.if_pending);
     try std.testing.expectEqual(original.slots, acquire.slots);
     try std.testing.expectEqual(original.mode, acquire.mode);
+    try std.testing.expect(Rate.eql(original.rate, acquire.rate));
 }
 
 test "LockRequest.fromJson correctly handles colon in command" {
@@ -225,9 +276,13 @@ test "LockRequest.fromJson rejects unknown fields and requests" {
 
 /// One row of the `list` response: a lock currently held, and one of the
 /// clients holding it. A lock with several holders has one row for each.
+/// A lock nobody holds has a single row with no holder (see `hasHolder`):
+/// its clients wait only for its rate limit, or it is idle but its rate
+/// limit still counts recent grants.
 pub const LockInfo = struct {
     name: []const u8,
-    /// Pid of the `nlock` client holding the lock, or 0 if unknown.
+    /// Pid of the `nlock` client holding the lock, or 0 if unknown or there
+    /// is no holder.
     pid: i32,
     /// Number of clients queued for the lock.
     waiters: usize,
@@ -235,9 +290,19 @@ pub const LockInfo = struct {
     slots: u32 = 1,
     /// How this holder holds the lock.
     mode: Mode = .exclusive,
-    /// When this holder acquired the lock, in seconds since the Unix epoch.
+    /// When this holder acquired the lock, in seconds since the Unix epoch,
+    /// or 0 if there is no holder.
     acquired_at: i64,
     command: []const u8,
+    /// The lock's rate limit, if any.
+    rate: ?Rate = null,
+    /// How many times the lock was granted in the current window of `rate`.
+    rate_used: u32 = 0,
+
+    /// False for the row of a lock nobody holds.
+    pub fn hasHolder(self: LockInfo) bool {
+        return self.acquired_at != 0;
+    }
 
     /// Serializes the LockInfo to a JSON string.
     /// Allocates memory for the JSON string, which must be freed by the caller.
@@ -285,7 +350,7 @@ test "LockInfo.fromJson(LockInfo.toJson()) round-trip works correctly" {
     const json = try original.toJson(allocator);
     defer allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"name\":\"mylock\",\"pid\":4242,\"waiters\":2,\"slots\":4,\"mode\":\"exclusive\",\"acquired_at\":1791331200,\"command\":\"echo Hello\"}",
+        "{\"name\":\"mylock\",\"pid\":4242,\"waiters\":2,\"slots\":4,\"mode\":\"exclusive\",\"acquired_at\":1791331200,\"command\":\"echo Hello\",\"rate\":null,\"rate_used\":0}",
         json,
     );
 
@@ -317,12 +382,17 @@ pub const LockResponse = union(enum) {
     /// A queued request was taken out of the queue by a newer request with
     /// `if_pending = replace`. Sent instead of `ok`.
     replaced: Replaced,
-    /// The lock is in use with a different number of slots than the
-    /// request asked for, so it was not queued.
+    /// The lock is in use with a different number of slots or rate limit
+    /// than the request asked for, so it was not queued.
     mismatch: Mismatch,
+    /// The request was not to wait (`nonblock`), and only the lock's rate
+    /// limit kept it from being granted. Sent instead of `busy`.
+    rate_limited: RateLimited,
 
     pub const Queued = struct {
-        /// The lock's longest-standing holder. Every slot is taken.
+        /// The lock's longest-standing holder: every slot is taken. Or, if
+        /// the lock has used up its rate limit, possibly none (pid 0, no
+        /// command).
         holder: LockInfo,
         /// Number of clients queued ahead of this one.
         ahead: usize,
@@ -344,6 +414,14 @@ pub const LockResponse = union(enum) {
     pub const Mismatch = struct {
         /// The number of slots the lock is in use with.
         slots: u32,
+        /// The rate limit the lock is in use with, if any.
+        rate: ?Rate = null,
+    };
+
+    pub const RateLimited = struct {
+        /// How long until the rate limit allows the lock to be granted again,
+        /// in milliseconds.
+        retry_after_ms: u64,
     };
 
     /// A client waiting for a lock.
@@ -416,7 +494,7 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trips a queued response
     const json = try original.toJson(allocator);
     defer allocator.free(json);
     try std.testing.expectEqualStrings(
-        "{\"queued\":{\"holder\":{\"name\":\"db\",\"pid\":4242,\"waiters\":3,\"slots\":1,\"mode\":\"exclusive\",\"acquired_at\":1791331200,\"command\":\"./migrate --up\"},\"ahead\":2}}",
+        "{\"queued\":{\"holder\":{\"name\":\"db\",\"pid\":4242,\"waiters\":3,\"slots\":1,\"mode\":\"exclusive\",\"acquired_at\":1791331200,\"command\":\"./migrate --up\",\"rate\":null,\"rate_used\":0},\"ahead\":2}}",
         json,
     );
 
@@ -429,17 +507,21 @@ test "LockResponse.fromJson(LockResponse.toJson()) round-trips a queued response
     try std.testing.expectEqualStrings("./migrate --up", queued.holder.command);
 }
 
-test "LockResponse.fromJson(LockResponse.toJson()) round-trips coalesced and replaced responses" {
+test "LockResponse.fromJson(LockResponse.toJson()) round-trips responses with a payload" {
     const allocator = std.testing.allocator;
     const client: LockResponse.Client = .{ .pid = 4321, .command = "make" };
     for ([_]LockResponse{
         .{ .coalesced = .{ .pending = client, .waiters = 1 } },
         .{ .replaced = .{ .pid = 4321 } },
         .{ .mismatch = .{ .slots = 4 } },
+        .{ .mismatch = .{ .slots = 1, .rate = .{ .count = 30, .period_s = 60 } } },
+        .{ .rate_limited = .{ .retry_after_ms = 1500 } },
     }, [_][]const u8{
         "{\"coalesced\":{\"pending\":{\"pid\":4321,\"command\":\"make\"},\"waiters\":1}}",
         "{\"replaced\":{\"pid\":4321}}",
-        "{\"mismatch\":{\"slots\":4}}",
+        "{\"mismatch\":{\"slots\":4,\"rate\":null}}",
+        "{\"mismatch\":{\"slots\":1,\"rate\":{\"count\":30,\"period_s\":60}}}",
+        "{\"rate_limited\":{\"retry_after_ms\":1500}}",
     }) |original, expected| {
         const json = try original.toJson(allocator);
         defer allocator.free(json);

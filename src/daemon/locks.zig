@@ -34,6 +34,9 @@ pub fn handleAcquireLockRequest(
     // the lock, or adding a waiter to the queue is atomic with respect to
     // other acquires and releases.
     map.lock();
+    const now = clockNow(io);
+    // Before `getOrPut`, which `removeUnused` would invalidate.
+    removeUnused(allocator, map, now);
     const entry = map.map.getOrPut(lock_request.name) catch |err| {
         map.unlock();
         return err;
@@ -50,13 +53,24 @@ pub fn handleAcquireLockRequest(
     }
     const lock = entry.value_ptr;
 
-    // Clients that disagree on the size of the lock would each limit the
-    // others differently, so only the size it is in use with is allowed.
-    if (lock.capacity != lock_request.slots) {
-        const capacity = lock.capacity;
+    if (lock.isIdle()) {
+        // Nobody holds or waits for the lock, so nobody depends on its size
+        // or rate limit: take the request's. A rate-limited lock keeps the
+        // grants it has counted, so this cannot reset its limit.
+        lock.capacity = lock_request.slots;
+        lock.setRateLimit(allocator, lock_request.rate) catch |err| {
+            if (!entry.found_existing) removeLocked(allocator, map, lock_request.name);
+            map.unlock();
+            return err;
+        };
+    } else if (lock.capacity != lock_request.slots or !protocol.Rate.eql(lock.rateLimit(), lock_request.rate)) {
+        // Clients that disagree on the size or rate limit of the lock would
+        // each limit the others differently, so only the ones it is in use
+        // with are allowed.
+        const mismatch: protocol.LockResponse.Mismatch = .{ .slots = lock.capacity, .rate = lock.rateLimit() };
         map.unlock();
-        log(.info, "Lock '{s}' is in use with {d} slot(s), not {d}", .{ lock_request.name, capacity, lock_request.slots });
-        const mismatch_response = try (protocol.LockResponse{ .mismatch = .{ .slots = capacity } }).toJson(allocator);
+        log(.info, "Lock '{s}' is in use with other slots or another rate limit than requested", .{lock_request.name});
+        const mismatch_response = try (protocol.LockResponse{ .mismatch = mismatch }).toJson(allocator);
         defer allocator.free(mismatch_response);
         try protocol.writeLine(writer, mismatch_response);
         return false;
@@ -66,8 +80,8 @@ pub fn handleAcquireLockRequest(
     // (`--coalesce`) or as someone ahead in the queue.
     lock.dropAbandonedTail(io);
 
-    if (lock.canGrantNow(client.mode)) {
-        lock.grant(client, nowSeconds(io));
+    if (lock.canGrantNow(client.mode, now)) {
+        lock.grant(client, now);
         map.unlock();
 
         log(.info, "Acquired lock for name '{s}' (uid: {d}, pid: {d}). Command: {s}", .{
@@ -99,8 +113,13 @@ pub fn handleAcquireLockRequest(
         };
 
         if (lock_request.nonblock) {
+            // If nothing but the rate limit is in the way, say when it would
+            // not be.
+            const response: protocol.LockResponse = if (lock.waiters.first == null and lock.hasRoomFor(client.mode)) .{
+                .rate_limited = .{ .retry_after_ms = msUntil(now, lock.rate.?.readyAt()) },
+            } else .busy;
             map.unlock();
-            const busy_response = try (protocol.LockResponse{ .busy = {} }).toJson(allocator);
+            const busy_response = try response.toJson(allocator);
             defer allocator.free(busy_response);
             try protocol.writeLine(writer, busy_response);
             return false;
@@ -112,7 +131,7 @@ pub fn handleAcquireLockRequest(
         // holder cannot change, but sent after releasing the mutex.
         const ahead = if (replace) 0 else lock.waiters.len();
         const queued_response = (protocol.LockResponse{ .queued = .{
-            .holder = lockInfo(lock_request.name, lock, lock.firstHolder(), ahead + 1),
+            .holder = lockInfo(lock_request.name, lock, lock.firstHolder(), ahead + 1, now),
             .ahead = ahead,
         } }).toJson(allocator) catch |err| {
             map.unlock();
@@ -132,8 +151,6 @@ pub fn handleAcquireLockRequest(
             }
             log(.info, "Replaced {d} waiter(s) for lock '{s}'", .{ replaced_count, lock_request.name });
         }
-        // Wait until a holder leaves and `grantWaiters` hands the lock to
-        // this client.
         lock.enqueue(client);
         map.unlock();
 
@@ -142,36 +159,88 @@ pub fn handleAcquireLockRequest(
         // The timeout comes from the client, so anything too large to be a
         // real limit is treated as no limit rather than trusted.
         const timeout_s: ?u64 = if (lock_request.timeout) |t| (if (t <= max_timeout_s) t else null) else null;
-        if (timeout_s) |t| {
-            log(.debug, "Waiting for lock '{s}' to be released with timeout of {d} seconds", .{ lock_request.name, t });
-            const timeout = std.Io.Timeout{ .duration = .{
-                .clock = .awake,
-                .raw = std.Io.Duration.fromSeconds(@intCast(t)),
-            } };
+        const deadline: ?i64 = if (timeout_s) |t| now.mono_ns + @as(i64, @intCast(t)) * std.time.ns_per_s else null;
+        log(.debug, "Waiting for lock '{s}' (timeout: {?d}s)", .{ lock_request.name, timeout_s });
 
+        // Wait for this client's turn.
+        //
+        // From here on, this connection does not decide what happens to the
+        // client: other connections do, by changing `client.state` under the
+        // mutex and then calling `client.event.set` to wake it:
+        //
+        //   .holding    `grantWaiters` gave it the lock, usually called by
+        //               the holder's connection as it releases.
+        //   .replaced   a newer `--replace` request took its place in the
+        //               queue.
+        //   .abandoned  someone noticed its `nlock` process is gone.
+        //
+        // Waking up does not mean any of these happened. It may also be the
+        // timeout, the rate limit's window opening, or `grantWaiters` saying
+        // "only the rate limit is in the way, wait for it". So every wake-up
+        // goes round the loop and checks `client.state` again, the usual
+        // pattern for a condition variable.
+        //
+        // The mutex is held at the top of every pass and while checking
+        // `client.state`, and released only while asleep.
+        map.lock();
+        while (client.state == .waiting) {
+            const t = clockNow(io);
+
+            // 1. Give up if the client's `--timeout` has passed.
+            if (deadline) |d| if (t.mono_ns >= d) {
+                log(.info, "Timeout while waiting for lock '{s}' to be released", .{lock_request.name});
+                leaveLocked(io, allocator, map, lock_request.name, client);
+                map.unlock();
+                const timeout_response = try (protocol.LockResponse{ .timeout = {} }).toJson(allocator);
+                defer allocator.free(timeout_response);
+                try protocol.writeLine(writer, timeout_response);
+                return false;
+            };
+
+            // 2. Try to grant the lock. Usually a holder leaving does this
+            // for us, but when only the rate limit keeps the front waiter
+            // out, no holder has to leave, so nobody else would. Once the
+            // window opens, the front waiter grants itself here.
+            //
+            // A waiter keeps its lock in the map, so the lookup cannot fail.
+            // It is looked up again each pass, not kept from before: while
+            // the mutex was released, other connections may have added locks
+            // and grown the map, moving this `Lock` to a new address.
+            const waited_for = map.map.getPtr(lock_request.name).?;
+            waited_for.grantWaiters(io, t);
+            if (client.state != .waiting) break;
+
+            // 3. Decide when to wake up on our own, if nobody wakes us
+            // first: at the timeout, or when the rate limit allows the next
+            // grant (only if this client is at the front and only the limit
+            // keeps it out), whichever is sooner. If neither applies,
+            // `wake_at` is null and only another connection can wake us.
+            var wake_at = deadline;
+            if (waited_for.rateWakeAt(client, t)) |ready| wake_at = @min(wake_at orelse ready, ready);
+
+            // 4. Sleep. The reset must come before `map.unlock`: every `set`
+            // is done under the mutex, so one that arrives after we unlock
+            // also arrives after the reset, and is not lost. Resetting after
+            // unlocking would leave a gap where a grant's `set` is wiped
+            // out, and we would sleep through our turn.
+            client.event.reset();
+            map.unlock();
+            const timeout: Io.Timeout = if (wake_at) |w| .{
+                .deadline = .{ .clock = .boot, .raw = .{ .nanoseconds = w } },
+            } else .none;
             client.event.waitTimeout(io, timeout) catch |err| switch (err) {
-                error.Timeout => {
-                    log(.info, "Timeout while waiting for lock '{s}' to be released", .{lock_request.name});
-                    map.lock();
-                    // Still waiting: give up. Otherwise the lock arrived, or
-                    // this client was replaced, just as the timeout expired;
-                    // handled below.
-                    if (client.state == .waiting) {
-                        leaveLocked(io, allocator, map, lock_request.name, client);
-                        map.unlock();
-                        const timeout_response = try (protocol.LockResponse{ .timeout = {} }).toJson(allocator);
-                        defer allocator.free(timeout_response);
-                        try protocol.writeLine(writer, timeout_response);
-                        return false;
-                    }
-                    map.unlock();
-                },
+                // Reaching `wake_at` is not an error. The checks at the top
+                // of the loop work out whether it was the deadline or the
+                // rate limit.
+                error.Timeout => {},
                 else => return err,
             };
-        } else {
-            log(.debug, "Waiting for lock '{s}' to be released without timeout", .{lock_request.name});
-            try client.event.wait(io);
+            map.lock();
         }
+        map.unlock();
+
+        // `client.state` is no longer `.waiting`: it was granted the lock,
+        // replaced, or abandoned.
 
         if (client.state == .abandoned) {
             // Nobody to tell: the socket's other end is closed.
@@ -223,20 +292,52 @@ fn leaveLocked(
     if (client.state != .holding and client.state != .waiting) return;
     const lock = map.map.getPtr(name) orelse return;
     lock.remove(client);
+    const now = clockNow(io);
     // Whoever left may have been all that kept the next waiters out.
-    lock.grantWaiters(io, nowSeconds(io));
-    if (lock.isUnused()) {
-        if (map.map.fetchRemove(name)) |kv| allocator.free(kv.key);
+    lock.grantWaiters(io, now);
+    if (lock.isUnused(now)) removeLocked(allocator, map, name);
+}
+
+/// Removes lock `name` from the map, with the map mutex held.
+fn removeLocked(allocator: std.mem.Allocator, map: *LockMap, name: []const u8) void {
+    var kv = map.map.fetchRemove(name) orelse return;
+    kv.value.deinit(allocator);
+    allocator.free(kv.key);
+}
+
+/// Removes every lock that is no longer worth keeping, with the map mutex
+/// held. `leave` removes a lock as soon as nobody holds or waits for it,
+/// but a rate-limited one stays until its recent grants no longer count,
+/// when nobody may be around to notice. Walks every lock.
+fn removeUnused(allocator: std.mem.Allocator, map: *LockMap, now: queue.Now) void {
+    while (true) {
+        // Removing invalidates the iterator, so start over after each.
+        var it = map.map.iterator();
+        const name = while (it.next()) |entry| {
+            if (entry.value_ptr.isUnused(now)) break entry.key_ptr.*;
+        } else return;
+        removeLocked(allocator, map, name);
     }
 }
 
-fn nowSeconds(io: Io) i64 {
-    return Io.Timestamp.now(io, .real).toSeconds();
+/// The time on both of a lock's clocks.
+fn clockNow(io: Io) queue.Now {
+    return .{
+        .wall_s = Io.Timestamp.now(io, .real).toSeconds(),
+        .mono_ns = @intCast(Io.Timestamp.now(io, .boot).nanoseconds),
+    };
+}
+
+/// Milliseconds from `now` until `mono_ns`, rounded up, or 0 if it has
+/// passed.
+fn msUntil(now: queue.Now, mono_ns: i64) u64 {
+    if (mono_ns <= now.mono_ns) return 0;
+    return std.math.divCeil(u64, @intCast(mono_ns - now.mono_ns), std.time.ns_per_ms) catch unreachable;
 }
 
 /// Describes the lock and one of its holders, or no holder if null. Only
 /// valid while the map mutex is held.
-fn lockInfo(name: []const u8, lock: *const Lock, holder: ?*const Client, waiters: usize) protocol.LockInfo {
+fn lockInfo(name: []const u8, lock: *const Lock, holder: ?*const Client, waiters: usize, now: queue.Now) protocol.LockInfo {
     return .{
         .name = name,
         .pid = if (holder) |h| h.pid else 0,
@@ -245,6 +346,8 @@ fn lockInfo(name: []const u8, lock: *const Lock, holder: ?*const Client, waiters
         .mode = if (holder) |h| h.mode else .exclusive,
         .acquired_at = if (holder) |h| h.acquired_at else 0,
         .command = if (holder) |h| h.command else "",
+        .rate = lock.rateLimit(),
+        .rate_used = if (lock.rate) |window| window.usedAt(now.mono_ns) else 0,
     };
 }
 
@@ -266,22 +369,35 @@ pub fn handleListLocksRequest(
         map.lock();
         defer map.unlock();
 
-        const now = nowSeconds(io);
+        const now = clockNow(io);
+        // Count only waiters that are still there. Dropping them may leave a
+        // lock unused, so remove those afterwards.
+        var drop_it = map.map.valueIterator();
+        while (drop_it.next()) |lock| lock.dropAbandoned(io, now);
+        removeUnused(allocator, map, now);
+
         var it = map.map.iterator();
         while (it.next()) |entry| {
             const lock = entry.value_ptr;
-            // Count only waiters that are still there. Never leaves the lock
-            // unused: waiters only queue behind a holder, and stay holders.
-            lock.dropAbandoned(io, now);
             // TODO: Below traversal is O(n) for waiters, store the count in
             // the lock itself. Same for holders. Probs less likely to be large
             // number holders though?
             const waiters = lock.waiters.len();
+            // A lock nobody holds is still listed, once: it has waiters held
+            // back by its rate limit, or it is idle but still counts recent
+            // grants.
+            if (lock.holders.first == null) {
+                const line = try lockInfo(entry.key_ptr.*, lock, null, waiters, now).toJson(allocator);
+                lines.append(allocator, line) catch |err| {
+                    allocator.free(line);
+                    return err;
+                };
+            }
             // One line per holder, longest-standing first.
             var holder_node = lock.holders.first;
             while (holder_node) |node| : (holder_node = node.next) {
                 const holder: *const Client = @fieldParentPtr("node", node);
-                const line = try lockInfo(entry.key_ptr.*, lock, holder, waiters).toJson(allocator);
+                const line = try lockInfo(entry.key_ptr.*, lock, holder, waiters, now).toJson(allocator);
                 lines.append(allocator, line) catch |err| {
                     allocator.free(line);
                     return err;
