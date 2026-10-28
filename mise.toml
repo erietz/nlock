@@ -66,6 +66,51 @@ description = "Build Debian (.deb) and Arch Linux (.pkg.tar.zst) packages"
 depends = ["package:deb", "package:arch"]
 
 
+[tasks."release:prepare"]
+description = "Open a PR that bumps build.zig.zon to the given version"
+usage = 'arg "<version>" help="Version to release, e.g. 0.1.6"'
+run = """
+set -euo pipefail
+VERSION="${usage_version#v}"
+if ! [[ "$VERSION" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+  echo "error: invalid version '$usage_version', expected e.g. 0.1.6" >&2
+  exit 1
+fi
+if [ -n "$(git status --porcelain)" ]; then
+  echo "error: working tree is not clean" >&2
+  exit 1
+fi
+git fetch origin main --tags
+if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+  echo "error: tag v$VERSION already exists" >&2
+  exit 1
+fi
+BRANCH="release/v$VERSION"
+git switch -c "$BRANCH" origin/main
+sed -i.bak "s/\\(\\.version = \\"\\)[^\\"]*\\"/\\1$VERSION\\"/" build.zig.zon && rm build.zig.zon.bak
+git diff --exit-code --quiet build.zig.zon && { echo "error: build.zig.zon is already at $VERSION" >&2; exit 1; }
+git commit -am "chore: release v$VERSION"
+git push -u origin "$BRANCH"
+gh pr create --base main --title "chore: release v$VERSION" \\
+  --body "Bumps build.zig.zon to $VERSION. After merging, run \\`mise run release:tag\\` to publish."
+"""
+
+[tasks."release:tag"]
+description = "Tag origin/main with the version in build.zig.zon and push the tag, triggering the release workflow"
+run = """
+set -euo pipefail
+git fetch origin main --tags
+VERSION="$(git show origin/main:build.zig.zon | sed -n 's/.*\\.version = "\\(.*\\)".*/\\1/p')"
+TAG="v$VERSION"
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+  echo "error: tag $TAG already exists; to retry a failed release, re-run the Release workflow for $TAG" >&2
+  exit 1
+fi
+git tag -a "$TAG" -m "Release $TAG" origin/main
+git push origin "refs/tags/$TAG"
+echo "Pushed $TAG. Follow the release with: gh run watch \\$(gh run list --workflow release.yml -L 1 --json databaseId -q '.[0].databaseId')"
+"""
+
 [tasks."test:unit"]
 run = "zig build test"
 
