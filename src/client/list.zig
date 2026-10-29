@@ -143,7 +143,12 @@ fn formatLockInfoTable(
 
         var name: std.ArrayList(u8) = .empty;
         try appendEscaped(allocator, &name, lock_info.name);
-        const slots = try std.fmt.allocPrint(allocator, "{d}/{d}", .{ holders, lock_info.slots });
+        // Only a lock with several slots has a count worth showing: one slot
+        // is the default, and shared holders share the lock's one slot.
+        const slots = if (lock_info.slots > 1 and lock_info.mode == .exclusive)
+            try std.fmt.allocPrint(allocator, "{d}/{d}", .{ holders, lock_info.slots })
+        else
+            "-";
         const waiters = try std.fmt.allocPrint(allocator, "{d}", .{lock_info.waiters});
         const rate = if (lock_info.rate) |r| try format.formatRate(allocator, r) else "-";
         const used = if (lock_info.rate != null) try std.fmt.allocPrint(allocator, "{d}", .{lock_info.rate_used}) else "-";
@@ -161,8 +166,7 @@ fn formatLockInfoTable(
             try formatElapsed(allocator, now - lock_info.acquired_at),
             waiters,
             @tagName(lock_info.mode),
-            // Shared holders share the lock's one slot.
-            if (lock_info.mode == .shared) "-" else slots,
+            slots,
             rate,
             used,
             command.items,
@@ -213,13 +217,13 @@ test "formatLockInfoTable aligns columns and leaves CMD last and unpadded" {
     const table = try formatLockInfoTable(arena, &lock_infos, true, 1065);
     try std.testing.expectEqualStrings(
         \\NAME         PID  ELAPSED  WAITERS  MODE       SLOTS  CMD
-        \\build        123    01:05        0  exclusive    1/1  make -j8
-        \\deploy-prod    -    17:44       12  exclusive    1/1  sh -c 'a\nb'
+        \\build        123    01:05        0  exclusive      -  make -j8
+        \\deploy-prod    -    17:44       12  exclusive      -  sh -c 'a\nb'
         \\
     , table);
 
     const no_header = try formatLockInfoTable(arena, lock_infos[0..1], false, 1065);
-    try std.testing.expectEqualStrings("build  123  01:05  0  exclusive  1/1  make -j8\n", no_header);
+    try std.testing.expectEqualStrings("build  123  01:05  0  exclusive  -  make -j8\n", no_header);
 }
 
 test "formatLockInfoTable shows a lock nobody holds" {
@@ -238,6 +242,22 @@ test "formatLockInfoTable shows a lock nobody holds" {
     , try formatLockInfoTable(arena, &lock_infos, true, 1065));
 }
 
+test "formatLockInfoTable shows no slot count for an idle lock with one slot" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Its shared holders are done, but its rate limit still counts them.
+    const lock_infos = [_]protocol.LockInfo{
+        .{ .name = "s", .pid = 0, .waiters = 3, .acquired_at = 0, .command = "", .rate = .{ .count = 7, .period_s = 10 }, .rate_used = 7 },
+    };
+    try std.testing.expectEqualStrings(
+        \\NAME  PID  ELAPSED  WAITERS  MODE  SLOTS   RATE  USED  CMD
+        \\s       -        -        3  -         -  7/10s     7  -
+        \\
+    , try formatLockInfoTable(arena, &lock_infos, true, 1065));
+}
+
 test "formatLockInfoTable shows RATE and USED only if some lock has a rate limit" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -249,15 +269,15 @@ test "formatLockInfoTable shows RATE and USED only if some lock has a rate limit
     };
     try std.testing.expectEqualStrings(
         \\NAME        PID  ELAPSED  WAITERS  MODE       SLOTS    RATE  USED  CMD
-        \\build       123    01:05        0  exclusive    1/1       -     -  make -j8
-        \\github-api  456    00:05        3  exclusive    1/1  5000/h    12  gh api /repos
+        \\build       123    01:05        0  exclusive      -       -     -  make -j8
+        \\github-api  456    00:05        3  exclusive      -  5000/h    12  gh api /repos
         \\
     , try formatLockInfoTable(arena, &lock_infos, true, 1065));
 
     // Without any rate limit, the columns are left out.
     try std.testing.expectEqualStrings(
         \\NAME   PID  ELAPSED  WAITERS  MODE       SLOTS  CMD
-        \\build  123    01:05        0  exclusive    1/1  make -j8
+        \\build  123    01:05        0  exclusive      -  make -j8
         \\
     , try formatLockInfoTable(arena, lock_infos[0..1], true, 1065));
 }
@@ -277,7 +297,7 @@ test "formatLockInfoTable and formatLockNames show a lock with several holders" 
 
     try std.testing.expectEqualStrings(
         \\NAME   PID  ELAPSED  WAITERS  MODE       SLOTS  CMD
-        \\build  123    01:05        0  exclusive    1/1  make
+        \\build  123    01:05        0  exclusive      -  make
         \\pool    20    01:05        1  exclusive    3/4  a
         \\pool    10    00:05        1  exclusive    3/4  c
         \\pool    30    00:05        1  exclusive    3/4  b

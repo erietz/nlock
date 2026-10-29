@@ -253,7 +253,7 @@ test "three different locks can be held at the same time and listed" {
         _ = fields.next().?; // ELAPSED depends on timing
         try std.testing.expectEqualStrings("0", fields.next().?);
         try std.testing.expectEqualStrings("exclusive", fields.next().?);
-        try std.testing.expectEqualStrings("1/1", fields.next().?);
+        try std.testing.expectEqualStrings("-", fields.next().?); // one slot, the default
         // CMD is everything after SLOTS, spaces included.
         try std.testing.expectEqualStrings("sh", fields.next().?);
         try std.testing.expect(std.mem.endsWith(u8, line, script));
@@ -1319,7 +1319,7 @@ test "list shows a rate-limited lock nobody holds, and how much of its limit is 
     defer gpa.free(result.stdout);
     defer gpa.free(result.stderr);
     try std.testing.expectEqual(Term{ .exited = 0 }, result.term);
-    try expectFields(std.mem.trimEnd(u8, result.stdout, "\n"), &.{ "api", "-", "-", "0", "-", "0/1", "3/m", "1", "-" });
+    try expectFields(std.mem.trimEnd(u8, result.stdout, "\n"), &.{ "api", "-", "-", "0", "-", "-", "3/m", "1", "-" });
 }
 
 /// A finished client run, and how long it took in seconds.
