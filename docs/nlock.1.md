@@ -109,8 +109,8 @@ Locks are managed by the **nlockd** daemon, which must be running before
 
     **SLOTS**
     :   How many of the lock's slots are taken, out of how many, such as
-        **3/4**. A lock without **\-\-slots** shows **1/1**, and shared
-        holders show **-**.
+        **3/4**. Shown only for a lock with more than one slot; others, and
+        shared holders, show **-**.
 
     **RATE**
     :   The lock's **\-\-rate** limit, written as that option takes it, such

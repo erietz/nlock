@@ -241,6 +241,27 @@ over the limit exits 75 and says when the next run is allowed. `--rate` combines
 with `--slots` to cap both how often and how many at once, and `nlock list`
 shows each limit and how much of it is used.
 
+Here ten 5-second jobs start together, but at most 7 may start in any 10
+seconds (`-s` lets the 7 run at once):
+
+```bash
+for i in {1..10}; do nlock run -s --rate 7/10s s -- sleep 5 & done
+```
+
+<p align="center">
+  <img alt="Ten jobs start under a 7/10s rate limit: seven run while three wait; the seven finish but the three keep waiting with nobody holding the lock, until the first starts are ten seconds old and the three run" src="docs/demo/rate.gif" width="800">
+</p>
+
+| Time | `nlock list` shows | Why |
+|---|---|---|
+| 0s | 7 holders, 3 waiters, USED 7 | The first 7 start; the limit is used up, so 3 wait. |
+| 5s | no holders, 3 waiters, USED 7 | The 7 are done, but their starts still count for 10 seconds. |
+| 10s | 3 holders, USED 3 | The first 7 starts fall out of the window, so the 3 start. |
+| 15s | no holders, USED 3 | The 3 are done; their starts count until 20s. |
+
+The waiters at 5s aren't waiting for anyone to finish. A limit counts starts,
+so they wait until the oldest start is 10 seconds old.
+
 **Let readers share, and writers go alone.** `-s` (`--shared`) holders run
 together; a plain (exclusive) request waits until they have all finished, and
 then runs alone. Unlike `flock -s`, a waiting writer is never starved: readers

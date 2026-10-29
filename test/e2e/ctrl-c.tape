@@ -21,7 +21,7 @@ Wait+Screen@5s /(?m)^waiter-status=130/
 Ctrl+B
 Down
 Type "nlock list" Enter
-Wait+Screen@5s /db\s+\d+\s+\d\d:\d\d\s+0\s+exclusive\s+1\/1\s+sleep 60/
+Wait+Screen@5s /db\s+\d+\s+\d\d:\d\d\s+0\s+exclusive\s+-\s+sleep 60/
 
 # Top: interrupt the holder's command
 Ctrl+B

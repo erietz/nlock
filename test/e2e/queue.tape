@@ -17,7 +17,7 @@ Wait+Screen@5s /nlock: waiting for 'gpu' . held by pid \d+ for \d\d:\d\d: cat \(
 Ctrl+B
 Down
 Type "nlock list" Enter
-Wait+Screen@5s /gpu\s+\d+\s+\d\d:\d\d\s+1\s+exclusive\s+1\/1\s+cat/
+Wait+Screen@5s /gpu\s+\d+\s+\d\d:\d\d\s+1\s+exclusive\s+-\s+cat/
 
 # Top: end cat's input, releasing the lock to the waiter
 Ctrl+B
